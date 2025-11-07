@@ -81,6 +81,8 @@ class azooKeyMacInputController: IMKInputController { // swiftlint:disable:this 
         super.activateServer(sender)
         // アプリケーションサポートのディレクトリを準備しておく
         self.prepareApplicationSupportDirectory()
+        // Register custom input table (if available) for `.tableName` usage
+        CustomInputTableStore.registerIfExists()
         self.updateZenzaiToggleMenuItem(newValue: self.zenzaiEnabled)
         self.updateLiveConversionToggleMenuItem(newValue: self.liveConversionEnabled)
         self.segmentsManager.activate()
@@ -98,20 +100,25 @@ class azooKeyMacInputController: IMKInputController { // swiftlint:disable:this 
 
     @MainActor
     override func deactivateServer(_ sender: Any!) {
-        // 未確定テキストが残っている場合は確定させる
-        if !self.segmentsManager.isEmpty {
-            let text = self.segmentsManager.commitMarkedText(inputState: self.inputState)
-            if let client = sender as? IMKTextInput {
-                client.insertText(text, replacementRange: NSRange(location: NSNotFound, length: 0))
-            }
-            self.inputState = .none // 状態をリセット
-            self.refreshMarkedText() // クライアントのmarkedTextを確実にクリア
-        }
         self.segmentsManager.deactivate()
         self.candidatesWindow.orderOut(nil)
         self.replaceSuggestionWindow.orderOut(nil)
         self.candidatesViewController.updateCandidates([], selectionIndex: nil, cursorLocation: .zero)
         super.deactivateServer(sender)
+    }
+
+    @MainActor
+    override func commitComposition(_ sender: Any!) {
+        if self.segmentsManager.isEmpty {
+            return
+        }
+        let text = self.segmentsManager.commitMarkedText(inputState: self.inputState)
+        if let client = sender as? IMKTextInput {
+            client.insertText(text, replacementRange: NSRange(location: NSNotFound, length: 0))
+        }
+        self.inputState = .none
+        self.refreshMarkedText()
+        self.refreshCandidateWindow()
     }
 
     @MainActor
@@ -198,6 +205,25 @@ class azooKeyMacInputController: IMKInputController { // swiftlint:disable:this 
         return handleClientAction(clientAction, clientActionCallback: clientActionCallback, client: client)
     }
 
+    private var inputStyle: InputStyle {
+        switch Config.InputStyle().value {
+        case .default:
+            .mapped(id: .defaultRomanToKana)
+        case .defaultAZIK:
+            .mapped(id: .defaultAZIK)
+        case .defaultKanaUS:
+            .mapped(id: .defaultKanaUS)
+        case .defaultKanaJIS:
+            .mapped(id: .defaultKanaJIS)
+        case .custom:
+            if CustomInputTableStore.exists() {
+                .mapped(id: .tableName(CustomInputTableStore.tableName))
+            } else {
+                .mapped(id: .defaultRomanToKana)
+            }
+        }
+    }
+
     // この種のコードは複雑にしかならないので、lintを無効にする
     // swiftlint:disable:next cyclomatic_complexity
     @MainActor func handleClientAction(_ clientAction: ClientAction, clientActionCallback: ClientActionCallback, client: IMKTextInput) -> Bool {
@@ -208,11 +234,15 @@ class azooKeyMacInputController: IMKInputController { // swiftlint:disable:this 
         case .hideCandidateWindow:
             self.segmentsManager.requestSetCandidateWindowState(visible: false)
         case .enterFirstCandidatePreviewMode:
+            self.segmentsManager.insertCompositionSeparator(inputStyle: self.inputStyle, skipUpdate: false)
             self.segmentsManager.requestSetCandidateWindowState(visible: false)
         case .enterCandidateSelectionMode:
+            self.segmentsManager.insertCompositionSeparator(inputStyle: self.inputStyle, skipUpdate: true)
             self.segmentsManager.update(requestRichCandidates: true)
         case .appendToMarkedText(let string):
-            self.segmentsManager.insertAtCursorPosition(string, inputStyle: .roman2kana)
+            self.segmentsManager.insertAtCursorPosition(string, inputStyle: self.inputStyle)
+        case .appendPieceToMarkedText(let pieces):
+            self.segmentsManager.insertAtCursorPosition(pieces: pieces, inputStyle: self.inputStyle)
         case .insertWithoutMarkedText(let string):
             client.insertText(string, replacementRange: NSRange(location: NSNotFound, length: 0))
         case .editSegment(let count):
@@ -223,15 +253,13 @@ class azooKeyMacInputController: IMKInputController { // swiftlint:disable:this 
         case .commitMarkedTextAndAppendToMarkedText(let string):
             let text = self.segmentsManager.commitMarkedText(inputState: self.inputState)
             client.insertText(text, replacementRange: NSRange(location: NSNotFound, length: 0))
-            self.segmentsManager.insertAtCursorPosition(string, inputStyle: .roman2kana)
+            self.segmentsManager.insertAtCursorPosition(string, inputStyle: self.inputStyle)
+        case .commitMarkedTextAndAppendPieceToMarkedText(let pieces):
+            let text = self.segmentsManager.commitMarkedText(inputState: self.inputState)
+            client.insertText(text, replacementRange: NSRange(location: NSNotFound, length: 0))
+            self.segmentsManager.insertAtCursorPosition(pieces: pieces, inputStyle: self.inputStyle)
         case .submitSelectedCandidate:
             self.submitSelectedCandidate()
-        case .submitSelectedCandidateAndAppendToMarkedText(let string):
-            self.submitSelectedCandidate()
-            self.segmentsManager.insertAtCursorPosition(string, inputStyle: .roman2kana)
-        case .submitSelectedCandidateAndEnterFirstCandidatePreviewMode:
-            self.submitSelectedCandidate()
-            self.segmentsManager.requestSetCandidateWindowState(visible: false)
         case .removeLastMarkedText:
             self.segmentsManager.deleteBackwardFromCursorPosition()
             self.segmentsManager.requestResettingSelection()
@@ -255,6 +283,14 @@ class azooKeyMacInputController: IMKInputController { // swiftlint:disable:this 
             self.submitCandidate(self.segmentsManager.getModifiedRubyCandidate {
                 $0.toKatakana().applyingTransform(.fullwidthToHalfwidth, reverse: false)!
             })
+        case .submitFullWidthRomanCandidate:
+            self.submitCandidate(self.segmentsManager.getModifiedRomanCandidate {
+                $0.applyingTransform(.fullwidthToHalfwidth, reverse: true)!
+            })
+        case .submitHalfWidthRomanCandidate:
+            self.submitCandidate(self.segmentsManager.getModifiedRomanCandidate {
+                $0.applyingTransform(.fullwidthToHalfwidth, reverse: false)!
+            })
         case .enableDebugWindow:
             self.segmentsManager.requestDebugWindowMode(enabled: true)
         case .disableDebugWindow:
@@ -274,7 +310,7 @@ class azooKeyMacInputController: IMKInputController { // swiftlint:disable:this 
         // PredictiveSuggestion
         case .requestPredictiveSuggestion:
             // 「つづき」を直接入力し、コンテキストを渡す
-            self.segmentsManager.insertAtCursorPosition("つづき", inputStyle: .roman2kana)
+            self.segmentsManager.insertAtCursorPosition("つづき", inputStyle: self.inputStyle)
             self.requestReplaceSuggestion()
         // ReplaceSuggestion
         case .requestReplaceSuggestion:
@@ -295,24 +331,6 @@ class azooKeyMacInputController: IMKInputController { // swiftlint:disable:this 
         case .transformSelectedText(let selectedText, let prompt):
             self.segmentsManager.appendDebugMessage("Executing transformSelectedText with text: '\(selectedText)' and prompt: '\(prompt)'")
             self.transformSelectedText(selectedText: selectedText, prompt: prompt)
-        // DeadKey handling
-        case .transitionToDeadKeyComposition(let deadKeyChar):
-            self.inputState = .deadKeyComposition(deadKeyChar)
-        case .insertDiacriticAndTransition(let string, let newState):
-            client.insertText(string, replacementRange: NSRange(location: NSNotFound, length: 0))
-            self.inputState = newState
-        case .commitMarkedTextAndReplaceWith(let string):
-            client.insertText(string, replacementRange: NSRange(location: NSNotFound, length: 0))
-            self.segmentsManager.stopComposition()
-        case .commitMarkedTextAndThenInsert(let stringToInsert):
-            let committedText = self.segmentsManager.commitMarkedText(inputState: self.inputState)
-            let textToInsert = committedText + stringToInsert
-            client.insertText(textToInsert, replacementRange: NSRange(location: NSNotFound, length: 0))
-            self.inputState = .none
-        case .stopCompositionAndSelectInputLanguage(let language):
-            self.segmentsManager.stopComposition()
-            self.inputLanguage = language
-            self.switchInputLanguage(language, client: client)
         // MARK: 特殊ケース
         case .consume:
             // 何もせず先に進む
@@ -545,7 +563,7 @@ extension azooKeyMacInputController {
                     Candidate(
                         text: text,
                         value: PValue(0),
-                        correspondingCount: text.count,
+                        composingCount: .surfaceCount(composingText.count),
                         lastMid: 0,
                         data: [],
                         actions: [],

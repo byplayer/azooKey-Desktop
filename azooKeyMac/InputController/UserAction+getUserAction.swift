@@ -1,37 +1,47 @@
 import Cocoa
 import Core
+import KanaKanjiConverterModule
 
 extension UserAction {
     // この種のコードは複雑にしかならないので、lintを無効にする
     // swiftlint:disable:next cyclomatic_complexity
     static func getUserAction(event: NSEvent, inputLanguage: InputLanguage) -> UserAction {
         // see: https://developer.mozilla.org/ja/docs/Web/API/UI_Events/Keyboard_event_code_values#mac_%E3%81%A7%E3%81%AE%E3%82%B3%E3%83%BC%E3%83%89%E5%80%A4
-        let keyMap: (String) -> String = switch inputLanguage {
-        case .english: { $0 }
+        let keyMap: (String) -> [InputPiece] = switch inputLanguage {
+        case .english: { string in string.map { .character($0) } }
         case .japanese:
             if Config.TypeCommaAndPeriod().value {
-                {
-                    KeyMap.h2zMap($0)
-                        .replacingOccurrences(of: "、", with: "，")
-                        .replacingOccurrences(of: "。", with: "．")
+                { string in
+                    string.map {
+                        let intention: Character? = switch $0 {
+                        case ",": "，"
+                        case ".": "．"
+                        default: KeyMap.h2zMap($0)
+                        }
+                        return .key(
+                            intention: intention,
+                            input: $0,
+                            modifiers: []
+                        )
+                    }
                 }
             } else {
-                KeyMap.h2zMap
+                { string in
+                    string.map {
+                        .key(intention: KeyMap.h2zMap($0), input: $0, modifiers: [])
+                    }
+                }
             }
         }
         // Diacritic processing
         if event.modifierFlags.contains(.option) && event.modifierFlags.isDisjoint(with: [.command, .control]) {
-            if let deadKeyInfo = DeadKeyComposer.deadKeyList[event.keyCode] {
+            if let diacritic = DiacriticAttacher.deadKeyList[event.keyCode] {
                 if event.modifierFlags.contains(.shift) {
                     // Shift + Option: insert diacritical mark only
-                    if let directChar = event.characters {
-                        return .input(directChar)
-                    } else {
-                        return .unknown
-                    }
+                    return event.characters.map { .input($0.map(InputPiece.character)) } ?? .unknown
                 } else {
                     // Option only: begin dead key sequence
-                    return .deadKey(deadKeyInfo.deadKeyChar)
+                    return .deadKey(diacritic)
                 }
             }
         }
@@ -48,6 +58,14 @@ extension UserAction {
         case 0x23: // Control + p
             if event.modifierFlags.contains(.control) {
                 return .navigation(.up)
+            } else if let text = event.characters, isPrintable(text) {
+                return .input(keyMap(text))
+            } else {
+                return .unknown
+            }
+        case 0x2E: // Control + m
+            if event.modifierFlags.contains(.control) {
+                return .enter
             } else if let text = event.characters, isPrintable(text) {
                 return .input(keyMap(text))
             } else {
@@ -85,6 +103,14 @@ extension UserAction {
             } else {
                 return .unknown
             }
+        case 0x25: // Control + l
+            if event.modifierFlags.contains(.control) {
+                return .function(.nine)
+            } else if let text = event.characters, isPrintable(text) {
+                return .input(keyMap(text))
+            } else {
+                return .unknown
+            }
         case 0x26: // Control + j
             if event.modifierFlags.contains(.control) {
                 return .function(.six)
@@ -96,6 +122,14 @@ extension UserAction {
         case 0x28: // Control + k
             if event.modifierFlags.contains(.control) {
                 return .function(.seven)
+            } else if let text = event.characters, isPrintable(text) {
+                return .input(keyMap(text))
+            } else {
+                return .unknown
+            }
+        case 0x27: // Control + :
+            if event.modifierFlags.contains(.control) {
+                return .function(.ten)
             } else if let text = event.characters, isPrintable(text) {
                 return .input(keyMap(text))
             } else {
@@ -117,7 +151,7 @@ extension UserAction {
             } else {
                 return .unknown
             }
-        case 36: // Enter
+        case 0x24, 0x4C: // Enter (0x24) and Numpad Enter (0x4C)
             return .enter
         case 48: // Tab
             return .tab
@@ -172,6 +206,10 @@ extension UserAction {
             return .function(.seven)
         case 100: // F8
             return .function(.eight)
+        case 101: // F9
+            return .function(.nine)
+        case 109: // F10
+            return .function(.ten)
         case 102: // Lang2/kVK_JIS_Eisu
             return .英数
         case 104: // Lang1/kVK_JIS_Kana
@@ -184,6 +222,15 @@ extension UserAction {
             return .navigation(.down)
         case 126: // Up
             return .navigation(.up)
+        case 0x4B: // Numpad Slash
+            return .input([.character("/")])
+        case 0x5F: // Numpad Comma
+            return .input([.character(",")])
+        case 0x41: // Numpad Period
+            return .input([.character(".")])
+        case 0x73, 0x77, 0x74, 0x79, 0x75, 0x47:
+            // Numpadでそれぞれ「入力先頭にカーソルを移動」「入力末尾にカーソルを移動」「変換候補欄を1ページ戻る」「変換候補欄を1ページ進む」「順方向削除」「入力全消し（より強いエスケープ）」に対応するが、サポート外の動作として明示的に無効化
+            return .unknown
         case 18, 19, 20, 21, 23, 22, 26, 28, 25, 29:
             if !event.modifierFlags.contains(.shift) && !event.modifierFlags.contains(.option) {
                 let number: UserAction.Number = [
@@ -199,6 +246,9 @@ extension UserAction {
                     29: .zero
                 ][event.keyCode]!
                 return .number(number)
+            } else if event.keyCode == 29 && event.modifierFlags.contains(.shift) && event.characters == "0" {
+                // JISキーボードにおいてShift+0の場合は特別な処理になる
+                return .number(.shiftZero)
             } else {
                 // go default
                 fallthrough

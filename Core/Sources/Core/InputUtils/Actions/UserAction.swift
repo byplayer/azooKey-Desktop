@@ -1,5 +1,6 @@
+import KanaKanjiConverterModule
 public enum UserAction {
-    case input(String)
+    case input([InputPiece])
     case backspace
     case enter
     case space(prefersFullWidthWhenInput: Bool)
@@ -22,11 +23,11 @@ public enum UserAction {
     }
 
     public enum Function: Sendable, Equatable, Hashable {
-        case six, seven, eight
+        case six, seven, eight, nine, ten
     }
 
     public enum Number: Sendable, Equatable, Hashable {
-        case one, two, three, four, five, six, seven, eight, nine, zero
+        case one, two, three, four, five, six, seven, eight, nine, zero, shiftZero
         public var intValue: Int {
             switch self {
             case .one: 1
@@ -39,6 +40,23 @@ public enum UserAction {
             case .eight: 8
             case .nine: 9
             case .zero: 0
+            case .shiftZero: 0
+            }
+        }
+
+        public var inputPiece: InputPiece {
+            switch self {
+            case .one: .character("1")
+            case .two: .character("2")
+            case .three: .character("3")
+            case .four: .character("4")
+            case .five: .character("5")
+            case .six: .character("6")
+            case .seven: .character("7")
+            case .eight: .character("8")
+            case .nine: .character("9")
+            case .zero: .character("0")
+            case .shiftZero: .key(intention: "0", input: "0", modifiers: [.shift])
             }
         }
 
@@ -54,6 +72,7 @@ public enum UserAction {
             case .eight: "8"
             case .nine: "9"
             case .zero: "0"
+            case .shiftZero: "0"
             }
         }
     }

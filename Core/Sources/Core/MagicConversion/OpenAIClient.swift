@@ -182,7 +182,13 @@ private struct Prompt {
 //
 // - methods:
 //    - toJSON(): リクエストをOpenAI APIに適したJSON形式に変換する。
-struct OpenAIRequest {
+public struct OpenAIRequest {
+    public init(prompt: String, target: String, modelName: String) {
+        self.prompt = prompt
+        self.target = target
+        self.modelName = modelName
+    }
+
     let prompt: String
     let target: String
     let modelName: String
@@ -223,14 +229,14 @@ struct OpenAIRequest {
     }
 }
 
-enum OpenAIError: LocalizedError {
+public enum OpenAIError: LocalizedError, @unchecked Sendable {
     case invalidURL
     case noServerResponse
     case invalidResponseStatus(code: Int, body: String)
     case parseError(String)
     case invalidResponseStructure(Any)
 
-    var errorDescription: String? {
+    public var errorDescription: String? {
         switch self {
         case .invalidURL:
             return "Could not connect to OpenAI service. Please check your internet connection."
@@ -258,19 +264,10 @@ enum OpenAIError: LocalizedError {
 }
 
 // OpenAI APIクライアント
-enum OpenAIClient {
+public enum OpenAIClient {
     // APIリクエストを送信する静的メソッド
-    static func sendRequest(_ request: OpenAIRequest, apiKey: String, apiEndpoint: String? = nil, logger: ((String) -> Void)? = nil) async throws -> [String] {
-        let configEndpoint = Config.OpenAiApiEndpoint().value
-        let endpoint = if let apiEndpoint = apiEndpoint, !apiEndpoint.isEmpty {
-            apiEndpoint
-        } else if !configEndpoint.isEmpty {
-            configEndpoint
-        } else {
-            Config.OpenAiApiEndpoint.default
-        }
-
-        guard let url = URL(string: endpoint) else {
+    public static func sendRequest(_ request: OpenAIRequest, apiKey: String, apiEndpoint: String, logger: ((String) -> Void)? = nil) async throws -> [String] {
+        guard let url = URL(string: apiEndpoint) else {
             throw OpenAIError.invalidURL
         }
 
@@ -348,17 +345,8 @@ enum OpenAIClient {
     }
 
     // Simple text transformation method for AI Transform feature
-    static func sendTextTransformRequest(prompt: String, modelName: String, apiKey: String, apiEndpoint: String? = nil) async throws -> String {
-        let configEndpoint = Config.OpenAiApiEndpoint().value
-        let endpoint = if let apiEndpoint = apiEndpoint, !apiEndpoint.isEmpty {
-            apiEndpoint
-        } else if !configEndpoint.isEmpty {
-            configEndpoint
-        } else {
-            Config.OpenAiApiEndpoint.default
-        }
-
-        guard let url = URL(string: endpoint) else {
+    public static func sendTextTransformRequest(prompt: String, modelName: String, apiKey: String, apiEndpoint: String) async throws -> String {
+        guard let url = URL(string: apiEndpoint) else {
             throw OpenAIError.invalidURL
         }
 
@@ -370,11 +358,26 @@ enum OpenAIClient {
         let body: [String: Any] = [
             "model": modelName,
             "messages": [
-                ["role": "system", "content": "You are a helpful assistant that transforms text according to user instructions."],
+                ["role": "system", "content": "You are a helpful assistant that transforms text according to user instructions. Return only the transformed text as a JSON object with a 'result' field."],
                 ["role": "user", "content": prompt]
             ],
-            "max_tokens": 150,
-            "temperature": 0.7
+            "response_format": [
+                "type": "json_schema",
+                "json_schema": [
+                    "name": "TextTransformResponse",
+                    "schema": [
+                        "type": "object",
+                        "properties": [
+                            "result": [
+                                "type": "string",
+                                "description": "The transformed text"
+                            ]
+                        ],
+                        "required": ["result"],
+                        "additionalProperties": false
+                    ]
+                ]
+            ]
         ]
 
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
@@ -392,17 +395,24 @@ enum OpenAIClient {
             throw OpenAIError.invalidResponseStatus(code: httpResponse.statusCode, body: responseBody)
         }
 
-        // Parse response data
+        // Parse response data using similar approach as sendRequest
         let jsonObject = try JSONSerialization.jsonObject(with: data)
         guard let jsonDict = jsonObject as? [String: Any],
               let choices = jsonDict["choices"] as? [[String: Any]],
               let firstChoice = choices.first,
               let message = firstChoice["message"] as? [String: Any],
-              let content = message["content"] as? String else {
+              let contentString = message["content"] as? String else {
             throw OpenAIError.invalidResponseStructure(jsonObject)
         }
 
-        return content.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Parse the structured JSON response
+        guard let contentData = contentString.data(using: .utf8),
+              let parsedContent = try JSONSerialization.jsonObject(with: contentData) as? [String: Any],
+              let result = parsedContent["result"] as? String else {
+            throw OpenAIError.parseError("Failed to parse structured response")
+        }
+
+        return result.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
 

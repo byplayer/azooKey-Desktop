@@ -1,8 +1,9 @@
 import InputMethodKit
+import KanaKanjiConverterModule
 
 public enum InputState: Sendable, Hashable {
     case none
-    case deadKeyComposition(String)
+    case attachDiacritic(String)
     case composing
     case previewing
     case selecting
@@ -60,20 +61,21 @@ public enum InputState: Sendable, Hashable {
             case .input(let string):
                 switch inputLanguage {
                 case .japanese:
-                    return (.appendToMarkedText(string), .transition(.composing))
+                    return (.appendPieceToMarkedText(string), .transition(.composing))
                 case .english:
-                    return (.insertWithoutMarkedText(string), .fallthrough)
+                    // 連結する
+                    return (.insertWithoutMarkedText(inputPiecesToString(string)), .fallthrough)
                 }
-            case .deadKey(let deadKeyChar):
+            case .deadKey(let diacritic):
                 if inputLanguage == .english {
-                    return (.transitionToDeadKeyComposition(deadKeyChar), .fallthrough)
+                    return (.consume, .transition(.attachDiacritic(diacritic)))
                 } else {
                     return (.fallthrough, .fallthrough)
                 }
             case .number(let number):
                 switch inputLanguage {
                 case .japanese:
-                    return (.appendToMarkedText(number.inputString), .transition(.composing))
+                    return (.appendPieceToMarkedText([number.inputPiece]), .transition(.composing))
                 case .english:
                     return (.insertWithoutMarkedText(number.inputString), .fallthrough)
                 }
@@ -96,35 +98,38 @@ public enum InputState: Sendable, Hashable {
             case .unknown, .navigation, .backspace, .enter, .escape, .function, .editSegment, .tab, .forget, .transformSelectedText:
                 return (.fallthrough, .fallthrough)
             }
-        case .deadKeyComposition(let deadKeyChar):
+        case .attachDiacritic(let diacritic):
             switch userAction {
             case .input(let string):
-                if let result = DeadKeyComposer.combine(deadKey: deadKeyChar, with: string, shift: event.modifierFlags.contains(.shift)) {
-                    return (.commitMarkedTextAndReplaceWith(result), .transition(.none))
+                let string = self.inputPiecesToString(string)
+                if let result = DiacriticAttacher.attach(deadKeyChar: diacritic, with: string, shift: event.modifierFlags.contains(.shift)) {
+                    return (.insertWithoutMarkedText(result), .transition(.none))
                 } else {
-                    return (.commitMarkedTextAndThenInsert(deadKeyChar + string), .transition(.none))
+                    return (.insertWithoutMarkedText(diacritic + string), .transition(.none))
                 }
-            case .deadKey(let newDeadKeyChar):
-                return (.insertDiacriticAndTransition(deadKeyChar, .deadKeyComposition(newDeadKeyChar)), .fallthrough)
+            case .deadKey(let newDiacritic):
+                return (.insertWithoutMarkedText(diacritic), .transition(.attachDiacritic(newDiacritic)))
+            case .number(let number):
+                return (.insertWithoutMarkedText(diacritic + number.inputString), .transition(.none))
             case .backspace, .escape:
                 return (.stopComposition, .transition(.none))
             case .かな:
-                return (.stopCompositionAndSelectInputLanguage(.japanese), .transition(.none))
+                return (.selectInputLanguage(.japanese), .transition(.none))
             case .function:
                 return (.consume, .fallthrough)
             case .enter:
-                return (.commitMarkedTextAndThenInsert(deadKeyChar + "\n"), .transition(.none))
+                return (.insertWithoutMarkedText(diacritic + "\n"), .transition(.none))
             case .tab:
-                return (.commitMarkedTextAndThenInsert(deadKeyChar + "\t"), .transition(.none))
-            default:
-                return (.commitMarkedTextAndThenInsert(deadKeyChar), .transition(.none))
+                return (.insertWithoutMarkedText(diacritic + "\t"), .transition(.none))
+            case .unknown, .space, .英数, .navigation, .editSegment, .suggest, .forget, .transformSelectedText:
+                return (.insertWithoutMarkedText(diacritic), .transition(.none))
             }
         case .composing:
             switch userAction {
             case .input(let string):
-                return (.appendToMarkedText(string), .fallthrough)
+                return (.appendPieceToMarkedText(string), .fallthrough)
             case .number(let number):
-                return (.appendToMarkedText(number.inputString), .fallthrough)
+                return (.appendPieceToMarkedText([number.inputPiece]), .fallthrough)
             case .backspace:
                 return (.removeLastMarkedText, .basedOnBackspace(ifIsEmpty: .none, ifIsNotEmpty: .composing))
             case .enter:
@@ -145,8 +150,12 @@ public enum InputState: Sendable, Hashable {
                     return (.submitKatakanaCandidate, .transition(.none))
                 case .eight:
                     return (.submitHankakuKatakanaCandidate, .transition(.none))
+                case .nine:
+                    return (.submitFullWidthRomanCandidate, .transition(.none))
+                case .ten:
+                    return (.submitHalfWidthRomanCandidate, .transition(.none))
                 }
-            case .かな:
+            case .かな, .forget:
                 return (.consume, .fallthrough)
             case .英数:
                 return (.commitMarkedTextAndSelectInputLanguage(.english), .transition(.none))
@@ -169,15 +178,15 @@ public enum InputState: Sendable, Hashable {
                 } else {
                     return (.fallthrough, .fallthrough)
                 }
-            case .forget, .unknown, .tab, .transformSelectedText, .deadKey:
+            case .unknown, .tab, .transformSelectedText, .deadKey:
                 return (.fallthrough, .fallthrough)
             }
         case .previewing:
             switch userAction {
             case .input(let string):
-                return (.commitMarkedTextAndAppendToMarkedText(string), .transition(.composing))
+                return (.commitMarkedTextAndAppendPieceToMarkedText(string), .transition(.composing))
             case .number(let number):
-                return (.appendToMarkedText(number.inputString), .transition(.composing))
+                return (.commitMarkedTextAndAppendPieceToMarkedText([number.inputPiece]), .transition(.composing))
             case .backspace:
                 return (.removeLastMarkedText, .transition(.composing))
             case .enter:
@@ -194,8 +203,12 @@ public enum InputState: Sendable, Hashable {
                     return (.submitKatakanaCandidate, .transition(.none))
                 case .eight:
                     return (.submitHankakuKatakanaCandidate, .transition(.none))
+                case .nine:
+                    return (.submitFullWidthRomanCandidate, .transition(.none))
+                case .ten:
+                    return (.submitHalfWidthRomanCandidate, .transition(.none))
                 }
-            case .かな:
+            case .かな, .forget:
                 return (.consume, .fallthrough)
             case .英数:
                 return (.commitMarkedTextAndSelectInputLanguage(.english), .transition(.none))
@@ -212,18 +225,19 @@ public enum InputState: Sendable, Hashable {
                 }
             case .editSegment(let count):
                 return (.editSegment(count), .transition(.selecting))
-            case .unknown, .suggest, .tab, .forget, .transformSelectedText, .deadKey:
+            case .unknown, .suggest, .tab, .transformSelectedText, .deadKey:
                 return (.fallthrough, .fallthrough)
             }
         case .selecting:
             switch userAction {
             case .input(let string):
-                if string == "d" && enableDebugWindow {
+                let s = self.inputPiecesToString(string)
+                if s == "d" && enableDebugWindow {
                     return (.enableDebugWindow, .fallthrough)
-                } else if string == "D" && enableDebugWindow {
+                } else if s == "D" && enableDebugWindow {
                     return (.disableDebugWindow, .fallthrough)
                 }
-                return (.commitMarkedTextAndAppendToMarkedText(string), .transition(.composing))
+                return (.commitMarkedTextAndAppendPieceToMarkedText(string), .transition(.composing))
             case .enter:
                 return (.submitSelectedCandidate, .basedOnSubmitCandidate(ifIsEmpty: .none, ifIsNotEmpty: .previewing))
             case .backspace:
@@ -265,13 +279,17 @@ public enum InputState: Sendable, Hashable {
                     return (.submitKatakanaCandidate, .basedOnSubmitCandidate(ifIsEmpty: .none, ifIsNotEmpty: .selecting))
                 case .eight:
                     return (.submitHankakuKatakanaCandidate, .basedOnSubmitCandidate(ifIsEmpty: .none, ifIsNotEmpty: .selecting))
+                case .nine:
+                    return (.submitFullWidthRomanCandidate, .basedOnSubmitCandidate(ifIsEmpty: .none, ifIsNotEmpty: .selecting))
+                case .ten:
+                    return (.submitHalfWidthRomanCandidate, .basedOnSubmitCandidate(ifIsEmpty: .none, ifIsNotEmpty: .selecting))
                 }
             case .number(let num):
                 switch num {
                 case .one, .two, .three, .four, .five, .six, .seven, .eight, .nine:
                     return (.selectNumberCandidate(num.intValue), .basedOnSubmitCandidate(ifIsEmpty: .none, ifIsNotEmpty: .previewing))
-                case .zero:
-                    return (.submitSelectedCandidateAndAppendToMarkedText(num.inputString), .transition(.composing))
+                case .zero, .shiftZero:
+                    return (.commitMarkedTextAndAppendPieceToMarkedText([num.inputPiece]), .transition(.composing))
                 }
             case .editSegment(let count):
                 return (.editSegment(count), .transition(.selecting))
@@ -288,7 +306,7 @@ public enum InputState: Sendable, Hashable {
             switch userAction {
             // 入力があったらcomposingに戻る
             case .input(let string):
-                return (.appendToMarkedText(string), .transition(.composing))
+                return (.appendPieceToMarkedText(string), .transition(.composing))
             case .space:
                 return (.selectNextReplaceSuggestionCandidate, .fallthrough)
             case .navigation(let direction):
@@ -307,9 +325,21 @@ public enum InputState: Sendable, Hashable {
                 return (.hideReplaceSuggestionWindow, .transition(.composing))
             case .英数:
                 return (.submitReplaceSuggestionCandidate, .transition(.none))
+            case .forget:
+                return (.consume, .fallthrough)
             default:
                 return (.fallthrough, .fallthrough)
             }
         }
+    }
+
+    private func inputPiecesToString(_ inputPieces: [InputPiece]) -> String {
+        String(inputPieces.compactMap {
+            switch $0 {
+            case .character(let c): c
+            case .key(intention: let cint, input: let cinp, modifiers: _): cint ?? cinp
+            case .compositionSeparator: nil
+            }
+        })
     }
 }

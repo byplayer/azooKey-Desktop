@@ -19,6 +19,9 @@ final class SegmentsManager {
     private var userDictionary: Config.UserDictionary.Value {
         Config.UserDictionary().value
     }
+    private var systemUserDictionary: Config.SystemUserDictionary.Value {
+        Config.SystemUserDictionary().value
+    }
     private var zenzaiPersonalizationLevel: Config.ZenzaiPersonalizationLevel.Value {
         Config.ZenzaiPersonalizationLevel().value
     }
@@ -82,7 +85,7 @@ final class SegmentsManager {
             Candidate(
                 text: string.replacingOccurrences(of: "\n", with: "\\n"),
                 value: 0,
-                correspondingCount: 0,
+                composingCount: .surfaceCount(0),
                 lastMid: 0,
                 data: []
             ),
@@ -123,7 +126,7 @@ final class SegmentsManager {
     }
 
     private func options(leftSideContext: String? = nil, requestRichCandidates: Bool = false) -> ConvertRequestOptions {
-        .withDefaultDictionary(
+        .init(
             requireJapanesePrediction: false,
             requireEnglishPrediction: false,
             keyboardLanguage: .ja_JP,
@@ -132,6 +135,8 @@ final class SegmentsManager {
             learningType: Config.Learning().value.learningType,
             memoryDirectoryURL: self.azooKeyMemoryDir,
             sharedContainerURL: self.azooKeyMemoryDir,
+            textReplacer: .withDefaultEmojiDictionary(),
+            specialCandidateProviders: KanaKanjiConverter.defaultSpecialCandidateProviders,
             zenzaiMode: self.zenzaiMode(leftSideContext: leftSideContext, requestRichCandidates: requestRichCandidates),
             metadata: self.metadata
         )
@@ -152,15 +157,13 @@ final class SegmentsManager {
     @MainActor
     func activate() {
         self.shouldShowCandidateWindow = false
-        self.kanaKanjiConverter.sendToDicdataStore(.setRequestOptions(options()))
         self.zenzaiPersonalizationMode = self.getZenzaiPersonalizationMode()
     }
 
     @MainActor
     func deactivate() {
         self.kanaKanjiConverter.stopComposition()
-        self.kanaKanjiConverter.sendToDicdataStore(.setRequestOptions(options()))
-        self.kanaKanjiConverter.sendToDicdataStore(.closeKeyboard)
+        self.kanaKanjiConverter.commitUpdateLearningData()
         self.rawCandidates = nil
         self.didExperienceSegmentEdition = false
         self.lastOperation = .other
@@ -187,9 +190,23 @@ final class SegmentsManager {
         self.rawCandidates = nil
         self.didExperienceSegmentEdition = false
         self.lastOperation = .other
-        self.kanaKanjiConverter.sendToDicdataStore(.closeKeyboard)
+        self.kanaKanjiConverter.commitUpdateLearningData()
         self.shouldShowCandidateWindow = false
         self.selectionIndex = nil
+    }
+
+    /// 変換キーを押したタイミングで入力の区切りを示す
+    @MainActor
+    func insertCompositionSeparator(inputStyle: InputStyle, skipUpdate: Bool = false) {
+        guard self.composingText.input.last?.piece != .compositionSeparator else {
+            // すでに末尾がcompositionSeparatorの場合は何もしない
+            return
+        }
+        self.composingText.insertAtCursorPosition([.init(piece: .compositionSeparator, inputStyle: inputStyle)])
+        self.lastOperation = .insert
+        if !skipUpdate {
+            self.updateRawCandidate()
+        }
     }
 
     @MainActor
@@ -202,11 +219,20 @@ final class SegmentsManager {
     }
 
     @MainActor
+    func insertAtCursorPosition(pieces: [InputPiece], inputStyle: InputStyle) {
+        self.composingText.insertAtCursorPosition(pieces.map { .init(piece: $0, inputStyle: inputStyle) })
+        self.lastOperation = .insert
+        // ライブ変換がオフの場合は変換候補ウィンドウを出したい
+        self.shouldShowCandidateWindow = !self.liveConversionEnabled
+        self.updateRawCandidate()
+    }
+
+    @MainActor
     func editSegment(count: Int) {
         // 現在選ばれているprefix candidateが存在する場合、まずそれに合わせてカーソルを移動する
         if let selectionIndex, let candidates, candidates.indices.contains(selectionIndex) {
             var afterComposingText = self.composingText
-            afterComposingText.prefixComplete(correspondingCount: candidates[selectionIndex].correspondingCount)
+            afterComposingText.prefixComplete(composingCount: candidates[selectionIndex].composingCount)
             let prefixCount = self.composingText.convertTarget.count - afterComposingText.convertTarget.count
             _ = self.composingText.moveCursorFromCursorPosition(count: -self.composingText.convertTargetCursorPosition + prefixCount)
         }
@@ -250,7 +276,7 @@ final class SegmentsManager {
     @MainActor
     func forgetMemory() {
         if let selectedCandidate {
-            self.kanaKanjiConverter.sendToDicdataStore(.forgetMemory(selectedCandidate))
+            self.kanaKanjiConverter.forgetMemory(selectedCandidate)
             self.appendDebugMessage("\(#function): forget \(selectedCandidate.data.map {$0.word})")
         }
     }
@@ -258,7 +284,7 @@ final class SegmentsManager {
     private var candidates: [Candidate]? {
         if let rawCandidates {
             if !self.didExperienceSegmentEdition {
-                if rawCandidates.firstClauseResults.lazy.map({$0.correspondingCount}).max() == rawCandidates.mainResults.lazy.map({$0.correspondingCount}).max() {
+                if rawCandidates.firstClauseResults.contains(where: { self.composingText.isWholeComposingText(composingCount: $0.composingCount) }) {
                     // firstClauseCandidateがmainResultsと同じサイズの場合は、何もしない方が良い
                     return rawCandidates.mainResults
                 } else {
@@ -315,10 +341,17 @@ final class SegmentsManager {
             return
         }
         // ユーザ辞書情報の更新
-        self.kanaKanjiConverter.sendToDicdataStore(.importDynamicUserDict(userDictionary.items.map {
+        var userDictionary: [DicdataElement] = userDictionary.items.map {
             .init(word: $0.word, ruby: $0.reading.toKatakana(), cid: CIDData.固有名詞.cid, mid: MIDData.一般.mid, value: -5)
-        }))
-        self.appendDebugMessage("userDictionaryCount: \(self.userDictionary.items.count)")
+        }
+        self.appendDebugMessage("userDictionaryCount: \(userDictionary.count)")
+        let systemUserDictionary: [DicdataElement] = systemUserDictionary.items.map {
+            .init(word: $0.word, ruby: $0.reading.toKatakana(), cid: CIDData.固有名詞.cid, mid: MIDData.一般.mid, value: -5)
+        }
+        self.appendDebugMessage("systemUserDictionaryCount: \(systemUserDictionary.count)")
+        userDictionary.append(contentsOf: consume systemUserDictionary)
+
+        self.kanaKanjiConverter.importDynamicUserDictionary(consume userDictionary)
 
         let prefixComposingText = self.composingText.prefixToCursorPosition()
         let leftSideContext = forcedLeftSideContext ?? self.getCleanLeftSideContext(maxCount: 30)
@@ -335,7 +368,7 @@ final class SegmentsManager {
     @MainActor func prefixCandidateCommited(_ candidate: Candidate, leftSideContext: String) {
         self.kanaKanjiConverter.setCompletedData(candidate)
         self.kanaKanjiConverter.updateLearningData(candidate)
-        self.composingText.prefixComplete(correspondingCount: candidate.correspondingCount)
+        self.composingText.prefixComplete(composingCount: candidate.composingCount)
 
         if !self.composingText.isEmpty {
             // カーソルを右端に移動する
@@ -394,7 +427,7 @@ final class SegmentsManager {
 
     func getCurrentCandidateWindow(inputState: InputState) -> CandidateWindow {
         switch inputState {
-        case .none, .previewing, .replaceSuggestion:
+        case .none, .previewing, .replaceSuggestion, .attachDiacritic:
             return .hidden
         case .composing:
             if !self.liveConversionEnabled, let firstCandidate = self.rawCandidates?.mainResults.first {
@@ -412,8 +445,6 @@ final class SegmentsManager {
             } else {
                 return .hidden
             }
-        case .deadKeyComposition(let deadKeyChar):
-            return .hidden
         }
     }
 
@@ -463,7 +494,7 @@ final class SegmentsManager {
             Candidate(
                 text: candidateText,
                 value: 0,
-                correspondingCount: composingText.input.count,
+                composingCount: .inputCount(composingText.input.count),
                 lastMid: 0,
                 data: [DicdataElement(
                     word: candidateText,
@@ -475,6 +506,32 @@ final class SegmentsManager {
             )
         }
 
+        return candidate
+    }
+
+    @MainActor
+    func getModifiedRomanCandidate(_ transform: (String) -> String) -> Candidate {
+        let inputString = String(self.composingText.input.compactMap {
+            switch $0.piece {
+            case .compositionSeparator: nil
+            case .character(let c): c
+            case .key(intention: _, input: let input, modifiers: _): input
+            }
+        })
+        let candidateText = transform(inputString)
+        let candidate = Candidate(
+            text: candidateText,
+            value: 0,
+            composingCount: .inputCount(composingText.input.count),
+            lastMid: 0,
+            data: [DicdataElement(
+                word: candidateText,
+                ruby: inputString,
+                cid: CIDData.固有名詞.cid,
+                mid: MIDData.一般.mid,
+                value: 0
+            )]
+        )
         return candidate
     }
 
@@ -500,13 +557,10 @@ final class SegmentsManager {
         suggestSelectionIndex = nil
     }
 
-    // swiftlint:disable:next cyclomatic_complexity
     func getCurrentMarkedText(inputState: InputState) -> MarkedText {
         switch inputState {
-        case .none:
+        case .none, .attachDiacritic:
             return MarkedText(text: [], selectionRange: .notFound)
-        case .deadKeyComposition(let deadKeyChar):
-            return MarkedText(text: [.init(content: self.composingText.convertTarget, focus: .focused)], selectionRange: .notFound)
         case .composing:
             let text = if self.lastOperation == .delete {
                 // 削除のあとは常にひらがなを示す
@@ -522,7 +576,8 @@ final class SegmentsManager {
             }
             return MarkedText(text: [.init(content: text, focus: .none)], selectionRange: .notFound)
         case .previewing:
-            if let fullCandidate = self.rawCandidates?.mainResults.first, fullCandidate.correspondingCount == self.composingText.input.count {
+            if let fullCandidate = self.rawCandidates?.mainResults.first,
+               self.composingText.isWholeComposingText(composingCount: fullCandidate.composingCount) {
                 return MarkedText(text: [.init(content: fullCandidate.text, focus: .none)], selectionRange: .notFound)
             } else {
                 return MarkedText(text: [.init(content: self.composingText.convertTarget, focus: .none)], selectionRange: .notFound)
@@ -531,7 +586,7 @@ final class SegmentsManager {
             if let candidates, !candidates.isEmpty {
                 self.selectionIndex = min(self.selectionIndex ?? 0, candidates.count - 1)
                 var afterComposingText = self.composingText
-                afterComposingText.prefixComplete(correspondingCount: candidates[self.selectionIndex!].correspondingCount)
+                afterComposingText.prefixComplete(composingCount: candidates[self.selectionIndex!].composingCount)
                 return MarkedText(
                     text: [
                         .init(content: candidates[self.selectionIndex!].text, focus: .focused),
@@ -562,4 +617,12 @@ final class SegmentsManager {
 
 protocol SegmentManagerDelegate: AnyObject {
     func getLeftSideContext(maxCount: Int) -> String?
+}
+
+private extension ComposingText {
+    func isWholeComposingText(composingCount: ComposingCount) -> Bool {
+        var c = self
+        c.prefixComplete(composingCount: composingCount)
+        return c.isEmpty
+    }
 }
