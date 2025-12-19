@@ -1,3 +1,4 @@
+import Cocoa
 import Core
 import SwiftUI
 
@@ -5,9 +6,8 @@ struct ConfigWindow: View {
     @ConfigState private var liveConversion = Config.LiveConversion()
     @ConfigState private var inputStyle = Config.InputStyle()
     @ConfigState private var typeBackSlash = Config.TypeBackSlash()
-    @ConfigState private var typeCommaAndPeriod = Config.TypeCommaAndPeriod()
+    @ConfigState private var punctuationStyle = Config.PunctuationStyle()
     @ConfigState private var typeHalfSpace = Config.TypeHalfSpace()
-    @ConfigState private var zenzai = Config.ZenzaiIntegration()
     @ConfigState private var zenzaiProfile = Config.ZenzaiProfile()
     @ConfigState private var zenzaiPersonalizationLevel = Config.ZenzaiPersonalizationLevel()
     @ConfigState private var enableOpenAiApiKey = Config.EnableOpenAiApiKey()
@@ -19,8 +19,8 @@ struct ConfigWindow: View {
     @ConfigState private var debugWindow = Config.DebugWindow()
     @ConfigState private var userDictionary = Config.UserDictionary()
     @ConfigState private var systemUserDictionary = Config.SystemUserDictionary()
+    @ConfigState private var keyboardLayout = Config.KeyboardLayout()
 
-    @State private var zenzaiHelpPopover = false
     @State private var zenzaiProfileHelpPopover = false
     @State private var zenzaiInferenceLimitHelpPopover = false
     @State private var openAiApiKeyPopover = false
@@ -28,6 +28,13 @@ struct ConfigWindow: View {
     @State private var showingRomajiTableEditor = false
     @State private var connectionTestResult: String?
     @State private var systemUserDictionaryUpdateMessage: SystemUserDictionaryUpdateMessage?
+    @State private var showingLearningResetConfirmation = false
+    @State private var learningResetMessage: LearningResetMessage?
+
+    private enum LearningResetMessage {
+        case success
+        case error(String)
+    }
 
     private enum SystemUserDictionaryUpdateMessage {
         case error(any Error)
@@ -92,6 +99,31 @@ struct ConfigWindow: View {
         connectionTestInProgress = false
     }
 
+    @MainActor
+    private func resetLearningData() {
+        guard let appDelegate = NSApplication.shared.delegate as? AppDelegate else {
+            learningResetMessage = .error("学習データのリセットに失敗しました")
+            Task {
+                try? await Task.sleep(for: .seconds(30))
+                if case .error = learningResetMessage {
+                    learningResetMessage = nil
+                }
+            }
+            return
+        }
+
+        appDelegate.kanaKanjiConverter.resetMemory()
+        learningResetMessage = .success
+
+        // 10秒後にメッセージを消す
+        Task {
+            try? await Task.sleep(for: .seconds(10))
+            if case .success = learningResetMessage {
+                learningResetMessage = nil
+            }
+        }
+    }
+
     @ViewBuilder
     private func helpButton(helpContent: LocalizedStringKey, isPresented: Binding<Bool>) -> some View {
         if #available(macOS 14, *) {
@@ -116,25 +148,8 @@ struct ConfigWindow: View {
                 Spacer()
                 Form {
 
-                    Picker("履歴学習", selection: $learning) {
-                        Text("学習する").tag(Config.Learning.Value.inputAndOutput)
-                        Text("学習を停止").tag(Config.Learning.Value.onlyOutput)
-                        Text("学習を無視").tag(Config.Learning.Value.nothing)
-                    }
-                    Picker("パーソナライズ", selection: $zenzaiPersonalizationLevel) {
-                        Text("オフ").tag(Config.ZenzaiPersonalizationLevel.Value.off)
-                        Text("弱く").tag(Config.ZenzaiPersonalizationLevel.Value.soft)
-                        Text("普通").tag(Config.ZenzaiPersonalizationLevel.Value.normal)
-                        Text("強く").tag(Config.ZenzaiPersonalizationLevel.Value.hard)
-                    }
-                    Divider()
-                    HStack {
-                        Toggle("Zenzaiを有効化", isOn: $zenzai)
-                        helpButton(helpContent: "Zenzaiはニューラル言語モデルを利用した最新のかな漢字変換システムです。\nMacのGPUを利用して高精度な変換を行います。\n変換エンジンはローカルで動作するため、外部との通信は不要です。", isPresented: $zenzaiHelpPopover)
-                    }
                     HStack {
                         TextField("変換プロフィール", text: $zenzaiProfile, prompt: Text("例：田中太郎/高校生"))
-                            .disabled(!zenzai.value)
                         helpButton(
                             helpContent: """
                         Zenzaiはあなたのプロフィールを考慮した変換を行うことができます。
@@ -158,10 +173,8 @@ struct ConfigWindow: View {
                                 }
                             )
                         )
-                        .disabled(!zenzai.value)
                         Stepper("", value: $inferenceLimit, in: 1 ... 50)
                             .labelsHidden()
-                            .disabled(!zenzai.value)
                         helpButton(helpContent: "推論上限を小さくすると、入力中のもたつきが改善されることがあります。", isPresented: $zenzaiInferenceLimitHelpPopover)
                     }
                     Divider()
@@ -177,11 +190,21 @@ struct ConfigWindow: View {
                             showingRomajiTableEditor = true
                         }
                     }
+                    Picker("キーボード配列", selection: $keyboardLayout) {
+                        Text("QWERTY").tag(Config.KeyboardLayout.Value.qwerty)
+                        Text("Colemak").tag(Config.KeyboardLayout.Value.colemak)
+                        Text("Dvorak").tag(Config.KeyboardLayout.Value.dvorak)
+                    }
                     Divider()
                     Toggle("ライブ変換を有効化", isOn: $liveConversion)
                     Toggle("円記号の代わりにバックスラッシュを入力", isOn: $typeBackSlash)
-                    Toggle("「、」「。」の代わりに「，」「．」を入力", isOn: $typeCommaAndPeriod)
                     Toggle("スペースは常に半角を入力", isOn: $typeHalfSpace)
+                    Picker("句読点の種類", selection: $punctuationStyle) {
+                        Text("、と。").tag(Config.PunctuationStyle.Value.`kutenAndToten`)
+                        Text("、と．").tag(Config.PunctuationStyle.Value.periodAndToten)
+                        Text("，と。").tag(Config.PunctuationStyle.Value.kutenAndComma)
+                        Text("，と．").tag(Config.PunctuationStyle.Value.periodAndComma)
+                    }
                     Divider()
                     LabeledContent {
                         HStack {
@@ -230,8 +253,51 @@ struct ConfigWindow: View {
                     } label: {
                         Text("システムのユーザ辞書")
                     }
+
+                    Picker("履歴学習", selection: $learning) {
+                        Text("学習する").tag(Config.Learning.Value.inputAndOutput)
+                        Text("学習を停止").tag(Config.Learning.Value.onlyOutput)
+                        Text("学習を無視").tag(Config.Learning.Value.nothing)
+                    }
+                    LabeledContent {
+                        HStack {
+                            Button("リセット") {
+                                showingLearningResetConfirmation = true
+                            }
+                            .confirmationDialog(
+                                "履歴学習データをリセットしますか？",
+                                isPresented: $showingLearningResetConfirmation,
+                                titleVisibility: .visible
+                            ) {
+                                Button("リセット", role: .destructive) {
+                                    resetLearningData()
+                                }
+                                Button("キャンセル", role: .cancel) {}
+                            }
+                            Spacer()
+                            switch learningResetMessage {
+                            case .none:
+                                EmptyView()
+                            case .success:
+                                Text("履歴学習データをリセットしました")
+                                    .foregroundColor(.green)
+                            case .error(let message):
+                                Text("エラー: \(message)")
+                                    .foregroundColor(.red)
+                            }
+                        }
+                    } label: {
+                        Text("履歴学習データ")
+                    }
+
                     Divider()
                     Toggle("（開発者用）デバッグウィンドウを有効化", isOn: $debugWindow)
+                    Picker("（開発者用）パーソナライズ", selection: $zenzaiPersonalizationLevel) {
+                        Text("オフ").tag(Config.ZenzaiPersonalizationLevel.Value.off)
+                        Text("弱く").tag(Config.ZenzaiPersonalizationLevel.Value.soft)
+                        Text("普通").tag(Config.ZenzaiPersonalizationLevel.Value.normal)
+                        Text("強く").tag(Config.ZenzaiPersonalizationLevel.Value.hard)
+                    }
                     Toggle("OpenAI APIキーの利用", isOn: $enableOpenAiApiKey)
                     HStack {
                         SecureField("OpenAI API", text: $openAiApiKey, prompt: Text("例:sk-xxxxxxxxxxx"))

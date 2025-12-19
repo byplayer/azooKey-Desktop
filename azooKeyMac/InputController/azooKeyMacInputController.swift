@@ -8,15 +8,11 @@ class azooKeyMacInputController: IMKInputController { // swiftlint:disable:this 
     var segmentsManager: SegmentsManager
     private var inputState: InputState = .none
     private var inputLanguage: InputLanguage = .japanese
-    var zenzaiEnabled: Bool {
-        Config.ZenzaiIntegration().value
-    }
     var liveConversionEnabled: Bool {
         Config.LiveConversion().value
     }
 
     var appMenu: NSMenu
-    var zenzaiToggleMenuItem: NSMenuItem
     var liveConversionToggleMenuItem: NSMenuItem
 
     private var candidatesWindow: NSWindow
@@ -32,7 +28,6 @@ class azooKeyMacInputController: IMKInputController { // swiftlint:disable:this 
         self.segmentsManager = SegmentsManager()
 
         self.appMenu = NSMenu(title: "azooKey")
-        self.zenzaiToggleMenuItem = NSMenuItem()
         self.liveConversionToggleMenuItem = NSMenuItem()
 
         // Initialize the candidates window
@@ -83,12 +78,11 @@ class azooKeyMacInputController: IMKInputController { // swiftlint:disable:this 
         self.prepareApplicationSupportDirectory()
         // Register custom input table (if available) for `.tableName` usage
         CustomInputTableStore.registerIfExists()
-        self.updateZenzaiToggleMenuItem(newValue: self.zenzaiEnabled)
         self.updateLiveConversionToggleMenuItem(newValue: self.liveConversionEnabled)
         self.segmentsManager.activate()
 
         if let client = sender as? IMKTextInput {
-            client.overrideKeyboard(withKeyboardNamed: "com.apple.keylayout.US")
+            client.overrideKeyboard(withKeyboardNamed: Config.KeyboardLayout().value.layoutIdentifier)
             var rect: NSRect = .zero
             client.attributes(forCharacterIndex: 0, lineHeightRectangle: &rect)
             self.candidatesViewController.updateCandidates([], selectionIndex: nil, cursorLocation: rect.origin)
@@ -124,7 +118,7 @@ class azooKeyMacInputController: IMKInputController { // swiftlint:disable:this 
     @MainActor
     override func setValue(_ value: Any!, forTag tag: Int, client sender: Any!) {
         if let value = value as? NSString {
-            self.client()?.overrideKeyboard(withKeyboardNamed: "com.apple.keylayout.US")
+            self.client()?.overrideKeyboard(withKeyboardNamed: Config.KeyboardLayout().value.layoutIdentifier)
             let englishMode = value == "com.apple.inputmethod.Roman"
             // 英数/かなの対応するキーが推された場合と同等のイベントを発生させる
             let userAction: UserAction? = if englishMode, self.inputLanguage != .english {
@@ -272,15 +266,15 @@ class azooKeyMacInputController: IMKInputController { // swiftlint:disable:this 
             self.submitSelectedCandidate()
             self.segmentsManager.requestResettingSelection()
         case .submitHiraganaCandidate:
-            self.submitCandidate(self.segmentsManager.getModifiedRubyCandidate {
+            self.submitCandidate(self.segmentsManager.getModifiedRubyCandidate(inputState: self.inputState) {
                 $0.toHiragana()
             })
         case .submitKatakanaCandidate:
-            self.submitCandidate(self.segmentsManager.getModifiedRubyCandidate {
+            self.submitCandidate(self.segmentsManager.getModifiedRubyCandidate(inputState: self.inputState) {
                 $0.toKatakana()
             })
         case .submitHankakuKatakanaCandidate:
-            self.submitCandidate(self.segmentsManager.getModifiedRubyCandidate {
+            self.submitCandidate(self.segmentsManager.getModifiedRubyCandidate(inputState: self.inputState) {
                 $0.toKatakana().applyingTransform(.fullwidthToHalfwidth, reverse: false)!
             })
         case .submitFullWidthRomanCandidate:
@@ -331,6 +325,33 @@ class azooKeyMacInputController: IMKInputController { // swiftlint:disable:this 
         case .transformSelectedText(let selectedText, let prompt):
             self.segmentsManager.appendDebugMessage("Executing transformSelectedText with text: '\(selectedText)' and prompt: '\(prompt)'")
             self.transformSelectedText(selectedText: selectedText, prompt: prompt)
+        // Unicode Input (Shift+Ctrl+U)
+        case .enterUnicodeInputMode:
+            // 状態遷移は clientActionCallback で行われるので、ここでは何もしない
+            break
+        case .appendToUnicodeInput:
+            // markedText の更新は refreshMarkedText で行われる
+            break
+        case .removeLastUnicodeInput:
+            // markedText の更新は refreshMarkedText で行われる
+            break
+        case .submitUnicodeInput(let codePoint):
+            if let scalar = UInt32(codePoint, radix: 16), let unicodeScalar = Unicode.Scalar(scalar) {
+                let character = String(Character(unicodeScalar))
+                client.insertText(character, replacementRange: NSRange(location: NSNotFound, length: 0))
+            }
+        case .cancelUnicodeInput:
+            // 状態遷移は clientActionCallback で行われるので、ここでは何もしない
+            break
+        case .submitSelectedCandidateAndEnterUnicodeInputMode:
+            // 選択中の候補を確定
+            self.submitSelectedCandidate()
+            // 残りのテキストがあればひらがなのまま確定
+            if !self.segmentsManager.isEmpty {
+                let text = self.segmentsManager.convertTarget
+                client.insertText(text, replacementRange: NSRange(location: NSNotFound, length: 0))
+                self.segmentsManager.stopComposition()
+            }
         // MARK: 特殊ケース
         case .consume:
             // 何もせず先に進む
@@ -361,7 +382,7 @@ class azooKeyMacInputController: IMKInputController { // swiftlint:disable:this 
     }
 
     @MainActor func switchInputLanguage(_ language: InputLanguage, client: IMKTextInput) {
-        client.overrideKeyboard(withKeyboardNamed: "com.apple.keylayout.US")
+        client.overrideKeyboard(withKeyboardNamed: Config.KeyboardLayout().value.layoutIdentifier)
         switch language {
         case .english:
             client.selectMode("dev.ensan.inputmethod.azooKeyMac.Roman")

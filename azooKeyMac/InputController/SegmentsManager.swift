@@ -10,9 +10,6 @@ final class SegmentsManager {
 
     private var composingText: ComposingText = ComposingText()
 
-    private var zenzaiEnabled: Bool {
-        Config.ZenzaiIntegration().value
-    }
     private var liveConversionEnabled: Bool {
         Config.LiveConversion().value
     }
@@ -97,22 +94,18 @@ final class SegmentsManager {
     }
 
     private func zenzaiMode(leftSideContext: String?, requestRichCandidates: Bool) -> ConvertRequestOptions.ZenzaiMode {
-        if self.zenzaiEnabled {
-            return .on(
-                weight: Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/ggml-model-Q5_K_M.gguf", isDirectory: false),
-                inferenceLimit: Config.ZenzaiInferenceLimit().value,
-                requestRichCandidates: requestRichCandidates,
-                personalizationMode: self.zenzaiPersonalizationMode,
-                versionDependentMode: .v3(
-                    .init(
-                        profile: Config.ZenzaiProfile().value,
-                        leftSideContext: leftSideContext
-                    )
+        .on(
+            weight: Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/ggml-model-Q5_K_M.gguf", isDirectory: false),
+            inferenceLimit: Config.ZenzaiInferenceLimit().value,
+            requestRichCandidates: requestRichCandidates,
+            personalizationMode: self.zenzaiPersonalizationMode,
+            versionDependentMode: .v3(
+                .init(
+                    profile: Config.ZenzaiProfile().value,
+                    leftSideContext: leftSideContext
                 )
             )
-        } else {
-            return .off
-        }
+        )
     }
 
     private var metadata: ConvertRequestOptions.Metadata {
@@ -351,7 +344,25 @@ final class SegmentsManager {
         self.appendDebugMessage("systemUserDictionaryCount: \(systemUserDictionary.count)")
         userDictionary.append(contentsOf: consume systemUserDictionary)
 
-        self.kanaKanjiConverter.importDynamicUserDictionary(consume userDictionary)
+        /// 日付・時刻変換を事前に入れておく
+        let dynamicShortcuts: [DicdataElement] =
+            [("MM/dd", -18), ("yyyy/MM/dd", -18.1), ("MM月dd日（E）", -18.2), ("yyyy年MM月dd日", -18.3)].flatMap { (format, value: PValue) in
+                [
+                    .init(word: DateTemplateLiteral(format: format, type: .western, language: .japanese, delta: "-2", deltaUnit: 60 * 60 * 24).export(), ruby: "オトトイ", cid: CIDData.固有名詞.cid, mid: MIDData.一般.mid, value: value),
+                    .init(word: DateTemplateLiteral(format: format, type: .western, language: .japanese, delta: "-1", deltaUnit: 60 * 60 * 24).export(), ruby: "キノウ", cid: CIDData.固有名詞.cid, mid: MIDData.一般.mid, value: value),
+                    .init(word: DateTemplateLiteral(format: format, type: .western, language: .japanese, delta: "0", deltaUnit: 1).export(), ruby: "キョウ", cid: CIDData.固有名詞.cid, mid: MIDData.一般.mid, value: value),
+                    .init(word: DateTemplateLiteral(format: format, type: .western, language: .japanese, delta: "1", deltaUnit: 60 * 60 * 24).export(), ruby: "アシタ", cid: CIDData.固有名詞.cid, mid: MIDData.一般.mid, value: value),
+                    .init(word: DateTemplateLiteral(format: format, type: .western, language: .japanese, delta: "2", deltaUnit: 60 * 60 * 24).export(), ruby: "アサッテ", cid: CIDData.固有名詞.cid, mid: MIDData.一般.mid, value: value)
+                ]
+            } + [
+                // 月
+                .init(word: DateTemplateLiteral(format: "MM月", type: .western, language: .japanese, delta: "0", deltaUnit: 1).export(), ruby: "コンゲツ", cid: CIDData.固有名詞.cid, mid: MIDData.一般.mid, value: -18),
+                // 年
+                .init(word: DateTemplateLiteral(format: "yyyy年", type: .western, language: .japanese, delta: "0", deltaUnit: 1).export(), ruby: "コトシ", cid: CIDData.固有名詞.cid, mid: MIDData.一般.mid, value: -18),
+                .init(word: DateTemplateLiteral(format: "Gyyyy年", type: .japanese, language: .japanese, delta: "0", deltaUnit: 1).export(), ruby: "コトシ", cid: CIDData.固有名詞.cid, mid: MIDData.一般.mid, value: -18.1)
+            ]
+
+        self.kanaKanjiConverter.importDynamicUserDictionary(consume userDictionary, shortcuts: dynamicShortcuts)
 
         let prefixComposingText = self.composingText.prefixToCursorPosition()
         let leftSideContext = forcedLeftSideContext ?? self.getCleanLeftSideContext(maxCount: 30)
@@ -427,7 +438,7 @@ final class SegmentsManager {
 
     func getCurrentCandidateWindow(inputState: InputState) -> CandidateWindow {
         switch inputState {
-        case .none, .previewing, .replaceSuggestion, .attachDiacritic:
+        case .none, .previewing, .replaceSuggestion, .attachDiacritic, .unicodeInput:
             return .hidden
         case .composing:
             if !self.liveConversionEnabled, let firstCandidate = self.rawCandidates?.mainResults.first {
@@ -473,40 +484,33 @@ final class SegmentsManager {
     }
 
     @MainActor
-    func getModifiedRubyCandidate(_ transform: (String) -> String) -> Candidate {
-        let ruby = if let selectedCandidate {
-            // `selectedCandidate.data` の全ての `ruby` を連結して返す
-            selectedCandidate.data.map { element in
-                element.ruby
-            }.joined()
-        } else {
-            // 選択範囲なしの場合はconvertTargetを返す
-            self.composingText.convertTarget
+    func getModifiedRubyCandidate(inputState: InputState, _ transform: (String) -> String) -> Candidate {
+        let (ruby, composingCount): (String, ComposingCount) = switch inputState {
+        case .selecting:
+            if let selectedRuby = selectedCandidate?.data.map({ $0.ruby }).joined() {
+                // `selectedCandidate.data` の全ての `ruby` を連結して返す
+                (selectedRuby, .surfaceCount(selectedRuby.count))
+            } else {
+                // 選択範囲なしの場合はconvertTargetを返す
+                (self.convertTarget, .inputCount(self.composingText.input.count))
+            }
+        case .composing, .previewing, .none, .replaceSuggestion, .attachDiacritic, .unicodeInput:
+            (self.convertTarget, .inputCount(self.composingText.input.count))
         }
         let candidateText = transform(ruby)
-        let candidate = if let selectedCandidate {
-            {
-                var candidate = selectedCandidate
-                candidate.text = candidateText
-                return candidate
-            }()
-        } else {
-            Candidate(
-                text: candidateText,
-                value: 0,
-                composingCount: .inputCount(composingText.input.count),
-                lastMid: 0,
-                data: [DicdataElement(
-                    word: candidateText,
-                    ruby: ruby,
-                    cid: CIDData.固有名詞.cid,
-                    mid: MIDData.一般.mid,
-                    value: 0
-                )]
-            )
-        }
-
-        return candidate
+        return Candidate(
+            text: candidateText,
+            value: 0,
+            composingCount: composingCount,
+            lastMid: 0,
+            data: [DicdataElement(
+                word: candidateText,
+                ruby: ruby,
+                cid: CIDData.固有名詞.cid,
+                mid: MIDData.一般.mid,
+                value: 0
+            )]
+        )
     }
 
     @MainActor
@@ -557,6 +561,7 @@ final class SegmentsManager {
         suggestSelectionIndex = nil
     }
 
+    // swiftlint:disable:next cyclomatic_complexity
     func getCurrentMarkedText(inputState: InputState) -> MarkedText {
         switch inputState {
         case .none, .attachDiacritic:
@@ -611,6 +616,13 @@ final class SegmentsManager {
                     selectionRange: .notFound
                 )
             }
+        case .unicodeInput(let codePoint):
+            // Unicode入力モード: "U+" + コードポイントを表示
+            let displayText = "U+" + codePoint
+            return MarkedText(
+                text: [.init(content: displayText, focus: .none)],
+                selectionRange: NSRange(location: displayText.count, length: 0)
+            )
         }
     }
 }

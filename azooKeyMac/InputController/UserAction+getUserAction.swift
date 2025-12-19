@@ -3,6 +3,22 @@ import Core
 import KanaKanjiConverterModule
 
 extension UserAction {
+    private static func intention(_ c: Character) -> Character? {
+        switch c {
+        case ",":
+            switch Config.PunctuationStyle().value {
+            case .kutenAndComma, .periodAndComma: "，"
+            default: KeyMap.h2zMap(c)
+            }
+        case ".":
+            switch Config.PunctuationStyle().value {
+            case .periodAndToten, .periodAndComma: "．"
+            default: KeyMap.h2zMap(c)
+            }
+        default: KeyMap.h2zMap(c)
+        }
+    }
+
     // この種のコードは複雑にしかならないので、lintを無効にする
     // swiftlint:disable:next cyclomatic_complexity
     static func getUserAction(event: NSEvent, inputLanguage: InputLanguage) -> UserAction {
@@ -10,26 +26,9 @@ extension UserAction {
         let keyMap: (String) -> [InputPiece] = switch inputLanguage {
         case .english: { string in string.map { .character($0) } }
         case .japanese:
-            if Config.TypeCommaAndPeriod().value {
-                { string in
-                    string.map {
-                        let intention: Character? = switch $0 {
-                        case ",": "，"
-                        case ".": "．"
-                        default: KeyMap.h2zMap($0)
-                        }
-                        return .key(
-                            intention: intention,
-                            input: $0,
-                            modifiers: []
-                        )
-                    }
-                }
-            } else {
-                { string in
-                    string.map {
-                        .key(intention: KeyMap.h2zMap($0), input: $0, modifiers: [])
-                    }
+            { string in
+                string.map {
+                    .key(intention: intention($0), input: $0, modifiers: [])
                 }
             }
         }
@@ -151,6 +150,14 @@ extension UserAction {
             } else {
                 return .unknown
             }
+        case 0x20: // Shift + Control + u
+            if event.modifierFlags.contains(.control) && event.modifierFlags.contains(.shift) {
+                return .startUnicodeInput
+            } else if let text = event.characters, isPrintable(text) {
+                return .input(keyMap(text))
+            } else {
+                return .unknown
+            }
         case 0x24, 0x4C: // Enter (0x24) and Numpad Enter (0x4C)
             return .enter
         case 48: // Tab
@@ -199,6 +206,29 @@ extension UserAction {
                 }
             } else {
                 return .input(keyMap("."))
+            }
+        case 0x2C: // Slash
+            return switch inputLanguage {
+            case .japanese:
+                if event.modifierFlags.contains([.shift, .option]) {
+                    // Option+Shift入力で…を入力する
+                    .input(keyMap("…"))
+                } else if event.modifierFlags.contains(.shift) {
+                    // シフト入力でQuestionを入力する
+                    .input(keyMap("?"))
+                } else if event.modifierFlags.contains(.option) {
+                    // Option入力でSlashを入力する
+                    .input(keyMap("／"))
+                } else {
+                    // そうでない場合は「・」を入力する（"/"がkeyMapで"・"に変換される）
+                    .input(keyMap("/"))
+                }
+            case .english:
+                if let text = event.characters, isPrintable(text) {
+                    .input(keyMap(text))
+                } else {
+                    .unknown
+                }
             }
         case 97: // F6
             return .function(.six)
