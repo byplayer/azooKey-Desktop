@@ -1,4 +1,3 @@
-import InputMethodKit
 import KanaKanjiConverterModule
 
 public enum ClientAction {
@@ -50,6 +49,7 @@ public enum ClientAction {
 
     // PredictiveSuggestion
     case requestPredictiveSuggestion
+    case acceptPredictionCandidate
 
     // ReplaceSuggestion
     case requestReplaceSuggestion

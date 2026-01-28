@@ -1,12 +1,21 @@
-import Core
 import Foundation
-import InputMethodKit
 import KanaKanjiConverterModuleWithDefaultDictionary
 
-final class SegmentsManager {
-    init() {}
+public final class SegmentsManager {
+    public init(
+        kanaKanjiConverter: KanaKanjiConverter,
+        applicationDirectoryURL: URL,
+        containerURL: URL?
+    ) {
+        self.kanaKanjiConverter = kanaKanjiConverter
+        self.applicationDirectoryURL = applicationDirectoryURL
+        self.containerURL = containerURL
+    }
 
-    weak var delegate: (any SegmentManagerDelegate)?
+    public weak var delegate: (any SegmentManagerDelegate)?
+    private var kanaKanjiConverter: KanaKanjiConverter
+    private let applicationDirectoryURL: URL
+    private let containerURL: URL?
 
     private var composingText: ComposingText = ComposingText()
 
@@ -35,6 +44,15 @@ final class SegmentsManager {
     private var replaceSuggestions: [Candidate] = []
     private var suggestSelectionIndex: Int?
 
+    public struct PredictionCandidate: Sendable {
+        public var displayText: String
+        public var appendText: String
+    }
+
+    private func candidateReading(_ candidate: Candidate) -> String {
+        candidate.data.map(\.ruby).joined()
+    }
+
     private lazy var zenzaiPersonalizationMode: ConvertRequestOptions.ZenzaiMode.PersonalizationMode? = self.getZenzaiPersonalizationMode()
 
     private func getZenzaiPersonalizationMode() -> ConvertRequestOptions.ZenzaiMode.PersonalizationMode? {
@@ -43,7 +61,7 @@ final class SegmentsManager {
         if alpha == 0 {
             return nil
         }
-        guard let containerURL = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.dev.ensan.inputmethod.azooKeyMac") else {
+        guard let containerURL else {
             self.appendDebugMessage("❌ Failed to get container URL.")
             return nil
         }
@@ -71,13 +89,7 @@ final class SegmentsManager {
         case other
     }
 
-    @MainActor private var kanaKanjiConverter: KanaKanjiConverter {
-        (
-            NSApplication.shared.delegate as? AppDelegate
-        )!.kanaKanjiConverter
-    }
-
-    func appendDebugMessage(_ string: String) {
+    public func appendDebugMessage(_ string: String) {
         self.debugCandidates.insert(
             Candidate(
                 text: string.replacingOccurrences(of: "\n", with: "\\n"),
@@ -118,10 +130,15 @@ final class SegmentsManager {
         }
     }
 
-    private func options(leftSideContext: String? = nil, requestRichCandidates: Bool = false) -> ConvertRequestOptions {
+    private func options(
+        leftSideContext: String?,
+        requestRichCandidates: Bool,
+        requireJapanesePrediction: ConvertRequestOptions.PredictionMode,
+        requireEnglishPrediction: ConvertRequestOptions.PredictionMode
+    ) -> ConvertRequestOptions {
         .init(
-            requireJapanesePrediction: false,
-            requireEnglishPrediction: false,
+            requireJapanesePrediction: requireJapanesePrediction,
+            requireEnglishPrediction: requireEnglishPrediction,
             keyboardLanguage: .ja_JP,
             englishCandidateInRoman2KanaInput: false,
             fullWidthRomanCandidate: true,
@@ -135,26 +152,18 @@ final class SegmentsManager {
         )
     }
 
-    var azooKeyMemoryDir: URL {
-        if #available(macOS 13, *) {
-            URL.applicationSupportDirectory
-                .appending(path: "azooKey", directoryHint: .isDirectory)
-                .appending(path: "memory", directoryHint: .isDirectory)
-        } else {
-            FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-                .appendingPathComponent("azooKey", isDirectory: true)
-                .appendingPathComponent("memory", isDirectory: true)
-        }
+    public var azooKeyMemoryDir: URL {
+        self.applicationDirectoryURL
     }
 
     @MainActor
-    func activate() {
+    public func activate() {
         self.shouldShowCandidateWindow = false
         self.zenzaiPersonalizationMode = self.getZenzaiPersonalizationMode()
     }
 
     @MainActor
-    func deactivate() {
+    public func deactivate() {
         self.kanaKanjiConverter.stopComposition()
         self.kanaKanjiConverter.commitUpdateLearningData()
         self.rawCandidates = nil
@@ -167,7 +176,7 @@ final class SegmentsManager {
 
     @MainActor
     /// この入力を打ち切る
-    func stopComposition() {
+    public func stopComposition() {
         self.composingText.stopComposition()
         self.kanaKanjiConverter.stopComposition()
         self.rawCandidates = nil
@@ -179,7 +188,7 @@ final class SegmentsManager {
 
     @MainActor
     /// 日本語入力自体をやめる
-    func stopJapaneseInput() {
+    public func stopJapaneseInput() {
         self.rawCandidates = nil
         self.didExperienceSegmentEdition = false
         self.lastOperation = .other
@@ -190,7 +199,7 @@ final class SegmentsManager {
 
     /// 変換キーを押したタイミングで入力の区切りを示す
     @MainActor
-    func insertCompositionSeparator(inputStyle: InputStyle, skipUpdate: Bool = false) {
+    public func insertCompositionSeparator(inputStyle: InputStyle, skipUpdate: Bool = false) {
         guard self.composingText.input.last?.piece != .compositionSeparator else {
             // すでに末尾がcompositionSeparatorの場合は何もしない
             return
@@ -203,7 +212,7 @@ final class SegmentsManager {
     }
 
     @MainActor
-    func insertAtCursorPosition(_ string: String, inputStyle: InputStyle) {
+    public func insertAtCursorPosition(_ string: String, inputStyle: InputStyle) {
         self.composingText.insertAtCursorPosition(string, inputStyle: inputStyle)
         self.lastOperation = .insert
         // ライブ変換がオフの場合は変換候補ウィンドウを出したい
@@ -212,7 +221,7 @@ final class SegmentsManager {
     }
 
     @MainActor
-    func insertAtCursorPosition(pieces: [InputPiece], inputStyle: InputStyle) {
+    public func insertAtCursorPosition(pieces: [InputPiece], inputStyle: InputStyle) {
         self.composingText.insertAtCursorPosition(pieces.map { .init(piece: $0, inputStyle: inputStyle) })
         self.lastOperation = .insert
         // ライブ変換がオフの場合は変換候補ウィンドウを出したい
@@ -221,7 +230,7 @@ final class SegmentsManager {
     }
 
     @MainActor
-    func editSegment(count: Int) {
+    public func editSegment(count: Int) {
         // 現在選ばれているprefix candidateが存在する場合、まずそれに合わせてカーソルを移動する
         if let selectionIndex, let candidates, candidates.indices.contains(selectionIndex) {
             var afterComposingText = self.composingText
@@ -252,7 +261,7 @@ final class SegmentsManager {
     }
 
     @MainActor
-    func deleteBackwardFromCursorPosition(count: Int = 1) {
+    public func deleteBackwardFromCursorPosition(count: Int = 1) {
         if !self.composingText.isAtEndIndex {
             // 右端に持っていく
             _ = self.composingText.moveCursorFromCursorPosition(count: self.composingText.convertTarget.count - self.composingText.convertTargetCursorPosition)
@@ -267,7 +276,7 @@ final class SegmentsManager {
     }
 
     @MainActor
-    func forgetMemory() {
+    public func forgetMemory() {
         if let selectedCandidate {
             self.kanaKanjiConverter.forgetMemory(selectedCandidate)
             self.appendDebugMessage("\(#function): forget \(selectedCandidate.data.map {$0.word})")
@@ -295,15 +304,15 @@ final class SegmentsManager {
         }
     }
 
-    var convertTarget: String {
+    public var convertTarget: String {
         self.composingText.convertTarget
     }
 
-    var isEmpty: Bool {
+    public var isEmpty: Bool {
         self.composingText.isEmpty
     }
 
-    func getCleanLeftSideContext(maxCount: Int) -> String? {
+    public func getCleanLeftSideContext(maxCount: Int) -> String? {
         self.delegate?.getLeftSideContext(maxCount: 30).map {
             var last = $0.split(separator: "\n", omittingEmptySubsequences: false).last ?? $0[...]
             // 前方の空白を削除する
@@ -346,13 +355,21 @@ final class SegmentsManager {
 
         /// 日付・時刻変換を事前に入れておく
         let dynamicShortcuts: [DicdataElement] =
-            [("MM/dd", -18), ("yyyy/MM/dd", -18.1), ("MM月dd日（E）", -18.2), ("yyyy年MM月dd日", -18.3)].flatMap { (format, value: PValue) in
+            [
+                ("M/d", -18, DateTemplateLiteral.CalendarType.western),
+                ("yyyy/MM/dd", -18.1, .western),
+                ("yyyy-MM-dd", -18.2, .western),
+                ("M月d日（E）", -18.3, .western),
+                ("yyyy年M月d日", -18.4, .western),
+                ("Gyyyy年M月d日", -18.5, .japanese),
+                ("E曜日", -18.6, .western)
+            ].flatMap { (format, value: PValue, type) in
                 [
-                    .init(word: DateTemplateLiteral(format: format, type: .western, language: .japanese, delta: "-2", deltaUnit: 60 * 60 * 24).export(), ruby: "オトトイ", cid: CIDData.固有名詞.cid, mid: MIDData.一般.mid, value: value),
-                    .init(word: DateTemplateLiteral(format: format, type: .western, language: .japanese, delta: "-1", deltaUnit: 60 * 60 * 24).export(), ruby: "キノウ", cid: CIDData.固有名詞.cid, mid: MIDData.一般.mid, value: value),
-                    .init(word: DateTemplateLiteral(format: format, type: .western, language: .japanese, delta: "0", deltaUnit: 1).export(), ruby: "キョウ", cid: CIDData.固有名詞.cid, mid: MIDData.一般.mid, value: value),
-                    .init(word: DateTemplateLiteral(format: format, type: .western, language: .japanese, delta: "1", deltaUnit: 60 * 60 * 24).export(), ruby: "アシタ", cid: CIDData.固有名詞.cid, mid: MIDData.一般.mid, value: value),
-                    .init(word: DateTemplateLiteral(format: format, type: .western, language: .japanese, delta: "2", deltaUnit: 60 * 60 * 24).export(), ruby: "アサッテ", cid: CIDData.固有名詞.cid, mid: MIDData.一般.mid, value: value)
+                    .init(word: DateTemplateLiteral(format: format, type: type, language: .japanese, delta: "-2", deltaUnit: 60 * 60 * 24).export(), ruby: "オトトイ", cid: CIDData.固有名詞.cid, mid: MIDData.一般.mid, value: value),
+                    .init(word: DateTemplateLiteral(format: format, type: type, language: .japanese, delta: "-1", deltaUnit: 60 * 60 * 24).export(), ruby: "キノウ", cid: CIDData.固有名詞.cid, mid: MIDData.一般.mid, value: value),
+                    .init(word: DateTemplateLiteral(format: format, type: type, language: .japanese, delta: "0", deltaUnit: 1).export(), ruby: "キョウ", cid: CIDData.固有名詞.cid, mid: MIDData.一般.mid, value: value),
+                    .init(word: DateTemplateLiteral(format: format, type: type, language: .japanese, delta: "1", deltaUnit: 60 * 60 * 24).export(), ruby: "アシタ", cid: CIDData.固有名詞.cid, mid: MIDData.一般.mid, value: value),
+                    .init(word: DateTemplateLiteral(format: format, type: type, language: .japanese, delta: "2", deltaUnit: 60 * 60 * 24).export(), ruby: "アサッテ", cid: CIDData.固有名詞.cid, mid: MIDData.一般.mid, value: value)
                 ]
             } + [
                 // 月
@@ -366,17 +383,25 @@ final class SegmentsManager {
 
         let prefixComposingText = self.composingText.prefixToCursorPosition()
         let leftSideContext = forcedLeftSideContext ?? self.getCleanLeftSideContext(maxCount: 30)
-        let result = self.kanaKanjiConverter.requestCandidates(prefixComposingText, options: options(leftSideContext: leftSideContext, requestRichCandidates: requestRichCandidates))
+        let result = self.kanaKanjiConverter.requestCandidates(
+            prefixComposingText,
+            options: options(
+                leftSideContext: leftSideContext,
+                requestRichCandidates: requestRichCandidates,
+                requireJapanesePrediction: Config.DebugPredictiveTyping().value ? .manualMix : .disabled,
+                requireEnglishPrediction: Config.DebugPredictiveTyping().value ? .manualMix : .disabled
+            )
+        )
         self.rawCandidates = result
     }
 
-    @MainActor func update(requestRichCandidates: Bool) {
+    @MainActor public func update(requestRichCandidates: Bool) {
         self.updateRawCandidate(requestRichCandidates: requestRichCandidates)
         self.shouldShowCandidateWindow = true
     }
 
     /// - note: 画面更新との整合性を保つため、この関数の実行前に左文脈を取得し、これを引数として与える
-    @MainActor func prefixCandidateCommited(_ candidate: Candidate, leftSideContext: String) {
+    @MainActor public func prefixCandidateCommited(_ candidate: Candidate, leftSideContext: String) {
         self.kanaKanjiConverter.setCompletedData(candidate)
         self.kanaKanjiConverter.updateLearningData(candidate)
         self.composingText.prefixComplete(composingCount: candidate.composingCount)
@@ -391,52 +416,52 @@ final class SegmentsManager {
         }
     }
 
-    enum CandidateWindow: Sendable {
+    public enum CandidateWindow: Sendable {
         case hidden
         case composing([Candidate], selectionIndex: Int?)
         case selecting([Candidate], selectionIndex: Int?)
     }
 
-    func requestSetCandidateWindowState(visible: Bool) {
+    public func requestSetCandidateWindowState(visible: Bool) {
         self.shouldShowCandidateWindow = visible
     }
 
-    func requestDebugWindowMode(enabled: Bool) {
+    public func requestDebugWindowMode(enabled: Bool) {
         self.shouldShowDebugCandidateWindow = enabled
     }
 
-    func requestSelectingNextCandidate() {
+    public func requestSelectingNextCandidate() {
         self.selectionIndex = (self.selectionIndex ?? -1) + 1
     }
 
-    func requestSelectingPrevCandidate() {
+    public func requestSelectingPrevCandidate() {
         self.selectionIndex = max(0, (self.selectionIndex ?? 1) - 1)
     }
 
-    func requestSelectingRow(_ index: Int) {
+    public func requestSelectingRow(_ index: Int) {
         self.selectionIndex = max(0, index)
     }
 
-    func requestSelectingSuggestionRow(_ row: Int) {
+    public func requestSelectingSuggestionRow(_ row: Int) {
         suggestSelectionIndex = row
     }
 
-    func stopSuggestionSelection() {
+    public func stopSuggestionSelection() {
         self.selectionIndex = nil
     }
 
-    func requestResettingSelection() {
+    public func requestResettingSelection() {
         self.selectionIndex = nil
     }
 
-    var selectedCandidate: Candidate? {
+    public var selectedCandidate: Candidate? {
         if let selectionIndex, let candidates, candidates.indices.contains(selectionIndex) {
             return candidates[selectionIndex]
         }
         return nil
     }
 
-    func getCurrentCandidateWindow(inputState: InputState) -> CandidateWindow {
+    public func getCurrentCandidateWindow(inputState: InputState) -> CandidateWindow {
         switch inputState {
         case .none, .previewing, .replaceSuggestion, .attachDiacritic, .unicodeInput:
             return .hidden
@@ -459,22 +484,22 @@ final class SegmentsManager {
         }
     }
 
-    struct MarkedText: Sendable, Equatable, Hashable, Sequence {
-        enum FocusState: Sendable, Equatable, Hashable {
+    public struct MarkedText: Sendable, Equatable, Hashable, Sequence {
+        public enum FocusState: Sendable, Equatable, Hashable {
             case focused
             case unfocused
             case none
         }
 
-        struct Element: Sendable, Equatable, Hashable {
-            var content: String
-            var focus: FocusState
+        public struct Element: Sendable, Equatable, Hashable {
+            public var content: String
+            public var focus: FocusState
         }
         var text: [Element]
 
-        var selectionRange: NSRange
+        public var selectionRange: NSRange
 
-        func makeIterator() -> Array<Element>.Iterator {
+        public func makeIterator() -> Array<Element>.Iterator {
             text.makeIterator()
         }
 
@@ -484,7 +509,7 @@ final class SegmentsManager {
     }
 
     @MainActor
-    func getModifiedRubyCandidate(inputState: InputState, _ transform: (String) -> String) -> Candidate {
+    public func getModifiedRubyCandidate(inputState: InputState, _ transform: (String) -> String) -> Candidate {
         let (ruby, composingCount): (String, ComposingCount) = switch inputState {
         case .selecting:
             if let selectedRuby = selectedCandidate?.data.map({ $0.ruby }).joined() {
@@ -514,7 +539,7 @@ final class SegmentsManager {
     }
 
     @MainActor
-    func getModifiedRomanCandidate(_ transform: (String) -> String) -> Candidate {
+    public func getModifiedRomanCandidate(_ transform: (String) -> String) -> Candidate {
         let inputString = String(self.composingText.input.compactMap {
             switch $0.piece {
             case .compositionSeparator: nil
@@ -540,7 +565,7 @@ final class SegmentsManager {
     }
 
     @MainActor
-    func commitMarkedText(inputState: InputState) -> String {
+    public func commitMarkedText(inputState: InputState) -> String {
         let markedText = self.getCurrentMarkedText(inputState: inputState)
         let text = markedText.reduce(into: "") {$0.append(contentsOf: $1.content)}
         if let candidate = self.candidates?.first(where: {$0.text == text}) {
@@ -551,18 +576,64 @@ final class SegmentsManager {
     }
 
     // サジェスト候補を設定するメソッド
-    func setReplaceSuggestions(_ candidates: [Candidate]) {
+    public func setReplaceSuggestions(_ candidates: [Candidate]) {
         self.replaceSuggestions = candidates
         self.suggestSelectionIndex = nil
     }
 
     // サジェスト候補の選択状態をリセット
-    func resetSuggestionSelection() {
+    public func resetSuggestionSelection() {
         suggestSelectionIndex = nil
     }
 
+    public func requestPredictionCandidates() -> [PredictionCandidate] {
+        guard Config.DebugPredictiveTyping().value else {
+            return []
+        }
+
+        let target = self.composingText.convertTarget
+        guard !target.isEmpty else {
+            return []
+        }
+
+        var matchTarget = target
+        if let last = matchTarget.last,
+           last.unicodeScalars.allSatisfy({ $0.isASCII && CharacterSet.letters.contains($0) }) {
+            matchTarget.removeLast()
+        }
+        guard matchTarget.count >= 2 else {
+            return []
+        }
+        matchTarget = matchTarget.toHiragana()
+
+        guard let rawCandidates else {
+            return []
+        }
+
+        for candidate in rawCandidates.predictionResults {
+            let reading = candidateReading(candidate)
+            guard !reading.isEmpty else {
+                continue
+            }
+            let readingHiragana = reading.toHiragana()
+            guard readingHiragana.hasPrefix(matchTarget) else {
+                continue
+            }
+            guard matchTarget.count < readingHiragana.count else {
+                continue
+            }
+            let appendText = String(readingHiragana.dropFirst(matchTarget.count))
+            guard !appendText.isEmpty else {
+                continue
+            }
+            return [.init(displayText: candidate.text, appendText: appendText)]
+        }
+
+        return []
+    }
+
     // swiftlint:disable:next cyclomatic_complexity
-    func getCurrentMarkedText(inputState: InputState) -> MarkedText {
+    public func getCurrentMarkedText(inputState: InputState) -> MarkedText {
         switch inputState {
         case .none, .attachDiacritic:
             return MarkedText(text: [], selectionRange: .notFound)
@@ -627,7 +698,7 @@ final class SegmentsManager {
     }
 }
 
-protocol SegmentManagerDelegate: AnyObject {
+public protocol SegmentManagerDelegate: AnyObject {
     func getLeftSideContext(maxCount: Int) -> String?
 }
 

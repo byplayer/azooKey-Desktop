@@ -5,9 +5,9 @@ protocol IntConfigItem: ConfigItem<Int> {
 }
 
 extension IntConfigItem {
-    var value: Int {
+    public var value: Int {
         get {
-            if let value = UserDefaults.standard.value(forKey: Self.key) {
+            if let value = UserDefaults.standard.object(forKey: Self.key) {
                 value as? Int ?? Self.default
             } else {
                 Self.default
@@ -20,8 +20,9 @@ extension IntConfigItem {
 }
 
 extension Config {
-    struct ZenzaiInferenceLimit: IntConfigItem {
-        static let `default` = 1
-        static let key = "dev.ensan.inputmethod.azooKeyMac.preference.zenzaiInferenceLimit"
+    public struct ZenzaiInferenceLimit: IntConfigItem {
+        public init() {}
+        static let `default` = 5
+        public static let key = "dev.ensan.inputmethod.azooKeyMac.preference.zenzaiInferenceLimit"
     }
 }

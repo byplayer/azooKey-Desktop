@@ -1,4 +1,5 @@
 import Cocoa
+import Core
 import Foundation
 import SwiftUI
 
@@ -14,6 +15,7 @@ final class PromptInputWindow: NSWindow {
     private var previewCallback: ((String, @escaping (String) -> Void) -> Void)?
     private var applyCallback: ((String) -> Void)?
     private var isTextFieldCurrentlyFocused: Bool = false
+    private var initialPrompt: String?
 
     init() {
         super.init(
@@ -52,6 +54,7 @@ final class PromptInputWindow: NSWindow {
 
     private func setupUI() {
         let contentView = PromptInputView(
+            initialPrompt: initialPrompt,
             onSubmit: { [weak self] prompt in
                 self?.completion?(prompt)
                 self?.close()
@@ -79,6 +82,7 @@ final class PromptInputWindow: NSWindow {
 
     func showPromptInput(
         at cursorLocation: NSPoint,
+        initialPrompt: String? = nil,
         onPreview: @escaping (String, @escaping (String) -> Void) -> Void,
         onApply: @escaping (String) -> Void,
         completion: @escaping (String?) -> Void
@@ -86,6 +90,7 @@ final class PromptInputWindow: NSWindow {
         self.previewCallback = onPreview
         self.applyCallback = onApply
         self.completion = completion
+        self.initialPrompt = initialPrompt
 
         // Reset the window display state
         resetWindowState()
@@ -147,55 +152,18 @@ final class PromptInputWindow: NSWindow {
             return cursorLocation
         }
 
-        let screenFrame = screen.visibleFrame
-        var origin = cursorLocation
-
-        // Offset slightly below and to the right of cursor
-        origin.x += 10
-        origin.y -= windowSize.height + 20
-
-        // Ensure window stays within screen bounds with padding
-        let padding: CGFloat = 20
-
-        // Check right edge
-        if origin.x + windowSize.width + padding > screenFrame.maxX {
-            origin.x = screenFrame.maxX - windowSize.width - padding
-        }
-
-        // Check left edge
-        if origin.x < screenFrame.minX + padding {
-            origin.x = screenFrame.minX + padding
-        }
-
-        // Check bottom edge - if too low, show above cursor
-        if origin.y < screenFrame.minY + padding {
-            origin.y = cursorLocation.y + 30
-
-            // If still doesn't fit above, position at screen edge
-            if origin.y + windowSize.height + padding > screenFrame.maxY {
-                origin.y = screenFrame.maxY - windowSize.height - padding
-            }
-        }
-
-        // Check top edge
-        if origin.y + windowSize.height + padding > screenFrame.maxY {
-            origin.y = screenFrame.maxY - windowSize.height - padding
-        }
-
-        return origin
+        let origin = WindowPositioning.promptWindowOrigin(
+            cursorLocation: WindowPositioning.Point(cursorLocation),
+            windowSize: WindowPositioning.Size(windowSize),
+            screenRect: WindowPositioning.Rect(screen.visibleFrame)
+        )
+        return origin.cgPoint
     }
 
     override func close() {
         // Call completion handler to reset flags before closing
         if let completion = self.completion {
             completion(nil)
-        }
-
-        // Restore focus to the previous application
-        DispatchQueue.main.async {
-            if let previousApp = NSWorkspace.shared.frontmostApplication {
-                previousApp.activate(options: [])
-            }
         }
 
         super.close()

@@ -63,7 +63,7 @@ extension azooKeyMacInputController {
     }
 
     @MainActor
-    func showPromptInputWindow() {
+    func showPromptInputWindow(initialPrompt: String? = nil) {
         self.segmentsManager.appendDebugMessage("showPromptInputWindow: Starting")
 
         // Set flag to prevent recursive calls
@@ -81,12 +81,14 @@ extension azooKeyMacInputController {
 
         guard selectedRange.length > 0 else {
             self.segmentsManager.appendDebugMessage("showPromptInputWindow: No selected text in window")
+            self.isPromptWindowVisible = false
             return
         }
 
         var actualRange = NSRange()
         guard let selectedText = client.string(from: selectedRange, actualRange: &actualRange) else {
             self.segmentsManager.appendDebugMessage("showPromptInputWindow: Failed to get selected text")
+            self.isPromptWindowVisible = false
             return
         }
 
@@ -111,6 +113,7 @@ extension azooKeyMacInputController {
         // Show prompt input window with preview functionality
         self.promptInputWindow.showPromptInput(
             at: cursorLocation,
+            initialPrompt: initialPrompt,
             onPreview: { [weak self] prompt, callback in
                 guard let self = self else {
                     return
@@ -160,21 +163,47 @@ extension azooKeyMacInputController {
             },
             completion: { [weak self] prompt in
                 self?.segmentsManager.appendDebugMessage("showPromptInputWindow: Window closed with prompt: \(prompt ?? "nil")")
+
+                // Restore focus on cancel (prompt == nil) here so every closing path including window-level Esc ends up restoring focus.
+                if prompt == nil, let app = currentApp {
+                    app.activate(options: [])
+                    self?.segmentsManager.appendDebugMessage("showPromptInputWindow: Restored focus to original app on cancel")
+                }
                 self?.isPromptWindowVisible = false
             }
         )
     }
 
     @MainActor
+    func triggerAiTranslation(initialPrompt: String) -> Bool {
+        let aiBackendEnabled = Config.AIBackendPreference().value != .off
+        guard aiBackendEnabled else {
+            self.segmentsManager.appendDebugMessage("AI translation ignored: AI backend is off")
+            return false
+        }
+        if self.isPromptWindowVisible {
+            self.segmentsManager.appendDebugMessage("AI translation ignored: prompt window already visible")
+            return true
+        }
+        guard let client = self.client() else {
+            self.segmentsManager.appendDebugMessage("AI translation ignored: No client available")
+            return false
+        }
+        self.showPromptInputWindow(initialPrompt: initialPrompt)
+        return true
+    }
+
+    @MainActor
     func transformSelectedText(selectedText: String, prompt: String, beforeContext: String = "", afterContext: String = "") {
         self.segmentsManager.appendDebugMessage("transformSelectedText: Starting with text '\(selectedText)' and prompt '\(prompt)'")
 
-        guard Config.EnableOpenAiApiKey().value else {
-            self.segmentsManager.appendDebugMessage("transformSelectedText: OpenAI API is not enabled")
+        let aiBackend = Config.AIBackendPreference().value
+        guard aiBackend != .off else {
+            self.segmentsManager.appendDebugMessage("transformSelectedText: AI backend is not enabled")
             return
         }
 
-        self.segmentsManager.appendDebugMessage("transformSelectedText: OpenAI API is enabled, starting request")
+        self.segmentsManager.appendDebugMessage("transformSelectedText: AI backend is enabled (\(aiBackend.rawValue)), starting request")
 
         Task {
             do {
@@ -204,25 +233,43 @@ extension azooKeyMacInputController {
                     self.segmentsManager.appendDebugMessage("transformSelectedText: Created system prompt")
                 }
 
-                // Get API key from Config
-                let apiKey = Config.OpenAiApiKey().value
-                guard !apiKey.isEmpty else {
-                    await MainActor.run {
-                        self.segmentsManager.appendDebugMessage("transformSelectedText: No OpenAI API key configured")
-                    }
+                let backend: AIBackend
+                switch aiBackend {
+                case .foundationModels:
+                    backend = .foundationModels
+                case .openAI:
+                    backend = .openAI
+                case .off:
                     return
                 }
 
+                let apiKey = Config.OpenAiApiKey().value
+                if backend == .openAI {
+                    guard !apiKey.isEmpty else {
+                        await MainActor.run {
+                            self.segmentsManager.appendDebugMessage("transformSelectedText: No OpenAI API key configured")
+                        }
+                        return
+                    }
+                }
+
                 await MainActor.run {
-                    self.segmentsManager.appendDebugMessage("transformSelectedText: API key found, making request")
+                    let message = backend == .openAI
+                        ? "transformSelectedText: API key found, making request"
+                        : "transformSelectedText: Using Foundation Models, making request"
+                    self.segmentsManager.appendDebugMessage(message)
                 }
 
                 let modelName = Config.OpenAiModelName().value
-                let result = try await OpenAIClient.sendTextTransformRequest(
-                    prompt: systemPrompt,
+                let result = try await AIClient.sendTextTransformRequest(
+                    systemPrompt,
+                    backend: backend,
                     modelName: modelName,
                     apiKey: apiKey,
-                    apiEndpoint: self.endpoint
+                    apiEndpoint: self.endpoint,
+                    logger: { [weak self] message in
+                        self?.segmentsManager.appendDebugMessage(message)
+                    }
                 )
 
                 await MainActor.run {
@@ -343,11 +390,12 @@ extension azooKeyMacInputController {
             self.segmentsManager.appendDebugMessage("getTransformationPreview: Starting preview request")
         }
 
-        guard Config.EnableOpenAiApiKey().value else {
+        let aiBackend = Config.AIBackendPreference().value
+        guard aiBackend != .off else {
             await MainActor.run {
-                self.segmentsManager.appendDebugMessage("getTransformationPreview: OpenAI API is not enabled")
+                self.segmentsManager.appendDebugMessage("getTransformationPreview: AI backend is not enabled")
             }
-            throw NSError(domain: "TransformationError", code: -1, userInfo: [NSLocalizedDescriptionKey: "AI transformation is not available. Please enable OpenAI API in preferences."])
+            throw NSError(domain: "TransformationError", code: -1, userInfo: [NSLocalizedDescriptionKey: "AI transformation is not available. Please enable AI backend in preferences."])
         }
 
         // Create custom prompt for text transformation with context
@@ -372,25 +420,40 @@ extension azooKeyMacInputController {
 
         systemPrompt += "\n\nUser instructions: \(prompt)"
 
-        // Get API key from Config
+        let backend: AIBackend
+        switch aiBackend {
+        case .foundationModels:
+            backend = .foundationModels
+        case .openAI:
+            backend = .openAI
+        case .off:
+            throw NSError(domain: "TransformationError", code: -1, userInfo: [NSLocalizedDescriptionKey: "AI transformation is not available. Please enable AI backend in preferences."])
+        }
+
         let apiKey = Config.OpenAiApiKey().value
-        guard !apiKey.isEmpty else {
-            await MainActor.run {
-                self.segmentsManager.appendDebugMessage("getTransformationPreview: No OpenAI API key configured")
+        if backend == .openAI {
+            guard !apiKey.isEmpty else {
+                await MainActor.run {
+                    self.segmentsManager.appendDebugMessage("getTransformationPreview: No OpenAI API key configured")
+                }
+                throw NSError(domain: "TransformationError", code: -2, userInfo: [NSLocalizedDescriptionKey: "OpenAI API key is missing. Please configure your API key in preferences."])
             }
-            throw NSError(domain: "TransformationError", code: -2, userInfo: [NSLocalizedDescriptionKey: "OpenAI API key is missing. Please configure your API key in preferences."])
         }
 
         await MainActor.run {
-            self.segmentsManager.appendDebugMessage("getTransformationPreview: Sending preview request to API")
+            self.segmentsManager.appendDebugMessage("getTransformationPreview: Sending preview request (\(backend.rawValue))")
         }
 
         let modelName = Config.OpenAiModelName().value
-        let result = try await OpenAIClient.sendTextTransformRequest(
-            prompt: systemPrompt,
+        let result = try await AIClient.sendTextTransformRequest(
+            systemPrompt,
+            backend: backend,
             modelName: modelName,
             apiKey: apiKey,
-            apiEndpoint: self.endpoint
+            apiEndpoint: self.endpoint,
+            logger: { [weak self] message in
+                self?.segmentsManager.appendDebugMessage(message)
+            }
         )
 
         await MainActor.run {

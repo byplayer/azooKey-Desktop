@@ -1,3 +1,4 @@
+import Core
 import Foundation
 import SwiftUI
 
@@ -11,6 +12,20 @@ struct PromptInputView: View {
     @State private var isNavigatingHistory: Bool = false
     @State private var includeContext: Bool = Config.IncludeContextInAITransform().value
     @FocusState private var isTextFieldFocused: Bool
+
+    let initialPrompt: String?
+    private var modelDisplayName: String {
+        let backend = Config.AIBackendPreference().value
+        switch backend {
+        case .off:
+            return "Off"
+        case .foundationModels:
+            return "Foundation Models"
+        case .openAI:
+            let modelName = Config.OpenAiModelName().value
+            return modelName.isEmpty ? "OpenAI API" : modelName
+        }
+    }
 
     let onSubmit: (String?) -> Void
     let onPreview: (String, Bool, @escaping (String) -> Void) -> Void  // Added includeContext parameter
@@ -41,15 +56,21 @@ struct PromptInputView: View {
                         .font(.system(size: 8, weight: .semibold))
                 }
 
-                Text("Magic Conversion")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(
-                        LinearGradient(
-                            colors: [.primary, .secondary],
-                            startPoint: .leading,
-                            endPoint: .trailing
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Magic Conversion")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(
+                            LinearGradient(
+                                colors: [.primary, .secondary],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
                         )
-                    )
+
+                    Text(modelDisplayName)
+                        .font(.system(size: 8, weight: .regular))
+                        .foregroundColor(.secondary.opacity(0.7))
+                }
 
                 Spacer()
 
@@ -95,6 +116,9 @@ struct PromptInputView: View {
                 onUpArrow: {
                     // Handle up arrow for history navigation
                     navigateHistory(direction: .up)
+                },
+                onCancel: {
+                    onCancel()
                 }
             )
             .onChange(of: isTextFieldFocused) { isFocused in
@@ -298,7 +322,8 @@ struct PromptInputView: View {
         .clipShape(RoundedRectangle(cornerRadius: 16))
         .onAppear {
             // Reset all state variables when the view appears
-            promptText = ""
+            let trimmedInitialPrompt = initialPrompt?.trimmingCharacters(in: .whitespacesAndNewlines)
+            promptText = trimmedInitialPrompt ?? ""
             previewText = ""
             isLoading = false
             showPreview = false
@@ -315,6 +340,13 @@ struct PromptInputView: View {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                 hoveredHistoryIndex = nil
                 isTextFieldFocused = true
+            }
+
+            if let trimmedInitialPrompt, !trimmedInitialPrompt.isEmpty {
+                // Trigger preview as if Enter was pressed once.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                    requestPreview()
+                }
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .navigateHistoryUp)) { _ in
@@ -518,6 +550,7 @@ struct PromptInputView: View {
 
 #Preview {
     PromptInputView(
+        initialPrompt: nil,
         onSubmit: { _ in
         },
         onPreview: { prompt, _, callback in

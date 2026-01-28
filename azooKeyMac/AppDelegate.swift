@@ -6,6 +6,7 @@
 //
 
 import Cocoa
+import Core
 import InputMethodKit
 import KanaKanjiConverterModuleWithDefaultDictionary
 import SwiftUI
@@ -32,7 +33,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     weak var userDictionaryEditorWindow: NSWindow?
     var configWindowController: NSWindowController?
     var userDictionaryEditorWindowController: NSWindowController?
-    @MainActor var kanaKanjiConverter = KanaKanjiConverter.withDefaultDictionary()
+    var kanaKanjiConverter = KanaKanjiConverter.withDefaultDictionary()
 
     private static func buildSwiftUIWindow(
         _ view: some View,
