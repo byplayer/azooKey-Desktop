@@ -36,6 +36,9 @@ class azooKeyMacInputController: IMKInputController, NSMenuItemValidation { // s
     private static let doubleTapInterval: TimeInterval = 0.5
     private static let candidateWindowInitialSize = CGSize(width: 400, height: 1000)
 
+    // ピン留めプロンプトのキャッシュ（パフォーマンス向上のため）
+    private var pinnedPromptsCache: [PromptHistoryItem] = []
+
     private static func makeCandidateWindow(contentViewController: NSViewController, inputClient: IMKTextInput?) -> NSWindow {
         let window = NSWindow(contentViewController: contentViewController)
         window.styleMask = [.borderless]
@@ -58,6 +61,44 @@ class azooKeyMacInputController: IMKInputController, NSMenuItemValidation { // s
         return isDouble
     }
 
+    /// ピン留めプロンプトのキャッシュを更新
+    func reloadPinnedPromptsCache() {
+        guard let data = UserDefaults.standard.data(forKey: Config.PromptHistory.key),
+              let history = try? JSONDecoder().decode([PromptHistoryItem].self, from: data) else {
+            self.pinnedPromptsCache = []
+            return
+        }
+        self.pinnedPromptsCache = history.filter { $0.isPinned }
+    }
+
+    // MARK: - カスタムプロンプトショートカット検出
+    private func checkCustomPromptShortcut(event: NSEvent) -> String? {
+        guard let characters = event.charactersIgnoringModifiers,
+              !characters.isEmpty else {
+            return nil
+        }
+
+        let key = characters.lowercased()
+        let eventModifiers = KeyEventCore.ModifierFlag(from: event.modifierFlags)
+
+        // 修飾キーがない場合は早期リターン（通常の入力）
+        if eventModifiers.isEmpty {
+            return nil
+        }
+
+        // キャッシュからショートカット付きのピン留めプロンプトを検索
+        if let matched = self.pinnedPromptsCache.first(where: { item in
+            guard let itemShortcut = item.shortcut else {
+                return false
+            }
+            return itemShortcut.key == key && itemShortcut.modifiers == eventModifiers
+        }) {
+            return matched.prompt
+        }
+
+        return nil
+    }
+
     override init!(server: IMKServer!, delegate: Any!, client inputClient: Any!) {
         let applicationDirectoryURL = if #available(macOS 13, *) {
             URL.applicationSupportDirectory
@@ -69,7 +110,7 @@ class azooKeyMacInputController: IMKInputController, NSMenuItemValidation { // s
             .appendingPathComponent("memory", isDirectory: true)
         }
 
-        let containerURL = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.dev.ensan.inputmethod.azooKeyMac")
+        let containerURL = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: AppGroup.azooKeyMacIdentifier)
         self.segmentsManager = SegmentsManager(
             kanaKanjiConverter: (NSApplication.shared.delegate as? AppDelegate)!.kanaKanjiConverter,
             applicationDirectoryURL: applicationDirectoryURL,
@@ -124,6 +165,8 @@ class azooKeyMacInputController: IMKInputController, NSMenuItemValidation { // s
         CustomInputTableStore.registerIfExists()
         self.updateLiveConversionToggleMenuItem(newValue: self.liveConversionEnabled)
         self.updateTransformSelectedTextMenuItemEnabledState()
+        // ピン留めプロンプトのキャッシュを更新
+        self.reloadPinnedPromptsCache()
         self.segmentsManager.activate()
 
         if let client = sender as? IMKTextInput {
@@ -227,6 +270,21 @@ class azooKeyMacInputController: IMKInputController, NSMenuItemValidation { // s
         }
         guard event.type == .keyDown else {
             return false
+        }
+
+        // カスタムプロンプトショートカットのチェック
+        if let matchedPrompt = checkCustomPromptShortcut(event: event) {
+            let aiBackendEnabled = Config.AIBackendPreference().value != .off
+            if aiBackendEnabled && !self.isPromptWindowVisible {
+                let selectedRange = client.selectedRange()
+                if selectedRange.length > 0 {
+                    if self.triggerAiTranslation(initialPrompt: matchedPrompt) {
+                        return true
+                    }
+                }
+            }
+            // ショートカットがマッチした場合はイベントを消費して他のハンドラに渡さない
+            return true
         }
 
         let userAction = UserAction.getUserAction(eventCore: event.keyEventCore, inputLanguage: inputLanguage)
@@ -542,7 +600,7 @@ class azooKeyMacInputController: IMKInputController, NSMenuItemValidation { // s
             return
         }
 
-        let predictions = self.segmentsManager.requestPredictionCandidates()
+        let predictions = self.requestPreferredPredictionCandidates()
         if predictions.isEmpty {
             let now = Date().timeIntervalSince1970
             let elapsed = now - self.lastPredictionUpdateTime
@@ -651,23 +709,14 @@ class azooKeyMacInputController: IMKInputController, NSMenuItemValidation { // s
 
     @MainActor
     private func acceptPredictionCandidate() {
-        let predictions = self.segmentsManager.requestPredictionCandidates()
+        let predictions = self.requestPreferredPredictionCandidates()
         guard let prediction = predictions.first else {
             return
         }
-
-        let currentTarget = self.segmentsManager.convertTarget
-        var matchTarget = currentTarget
-        if let last = matchTarget.last,
-           last.unicodeScalars.allSatisfy({ $0.isASCII && CharacterSet.letters.contains($0) }) {
-            matchTarget.removeLast()
-            self.segmentsManager.deleteBackwardFromCursorPosition(count: 1)
+        let deleteCount = prediction.deleteCount
+        if deleteCount > 0 {
+            self.segmentsManager.deleteBackwardFromCursorPosition(count: deleteCount)
         }
-
-        guard !matchTarget.isEmpty else {
-            return
-        }
-
         let appendText = prediction.appendText
 
         guard !appendText.isEmpty else {
@@ -675,6 +724,13 @@ class azooKeyMacInputController: IMKInputController, NSMenuItemValidation { // s
         }
 
         self.segmentsManager.insertAtCursorPosition(appendText, inputStyle: .direct)
+    }
+
+    private func requestPreferredPredictionCandidates() -> [SegmentsManager.PredictionCandidate] {
+        SegmentsManager.preferredPredictionCandidates(
+            typoCorrectionCandidates: self.segmentsManager.requestTypoCorrectionPredictionCandidates(),
+            predictionCandidates: self.segmentsManager.requestPredictionCandidates()
+        )
     }
 
     var retryCount = 0
