@@ -55,6 +55,10 @@
 				<true/>
 				<key>tsInputModeJISKeyboardShortcutKey</key>
 				<integer>3</integer>
+				<key>tsInputModeKeyEquivalentKey</key>
+				<string>;</string>
+				<key>tsInputModeKeyEquivalentModifiersKey</key>
+				<integer>4608</integer>
 				<key>tsInputModeMenuIconFileKey</key>
 				<string>en.tiff</string>
 				<key>tsInputModePaletteIconFileKey</key>
