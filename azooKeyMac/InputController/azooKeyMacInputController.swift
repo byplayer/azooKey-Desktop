@@ -221,9 +221,13 @@ class azooKeyMacInputController: IMKInputController, NSMenuItemValidation { // s
 
             if englishMode {
                 // 英語モードへの切り替え通知（実際の処理はhandleで行う）
-                // メニューバー経由の切り替えに対応
-                if self.inputLanguage == .japanese && self.segmentsManager.isEmpty {
+                // メニューバーやshortcut経由の切り替えに対応する。
+                // composing中でも英数キーMarkedTextを保ったまま英語入力へ移る。
+                if self.inputLanguage == .japanese {
                     self.inputLanguage = .english
+                    self.segmentsManager.stopJapaneseInput()
+                    self.refreshCandidateWindow()
+                    self.refreshPredictionWindow()
                 }
             } else {
                 // 日本語モードへの切り替え
@@ -649,13 +653,18 @@ class azooKeyMacInputController: IMKInputController, NSMenuItemValidation { // s
     }
 
     private func positionPredictionWindowRightOfCandidateWindow(gap: CGFloat = 8) {
-        guard let screen = self.predictionWindow.screen ?? self.candidatesWindow.screen else {
+        // アンカーである候補ウィンドウの中心が乗っているスクリーンを基準にする。
+        // predictionWindow.screen / candidatesWindow.screen はマルチディスプレイ遷移直後に
+        // 古いディスプレイを返すことがあるため、frame の中心点で能動的に判定する。
+        let anchorFrame = self.candidatesWindow.frame
+        let anchorCenter = CGPoint(x: anchorFrame.midX, y: anchorFrame.midY)
+        guard let screen = ScreenLookup.screen(containing: anchorCenter, fallbackWindow: self.candidatesWindow) else {
             return
         }
 
         let frame = WindowPositioning.frameRightOfAnchor(
             currentFrame: WindowPositioning.Rect(self.predictionWindow.frame),
-            anchorFrame: WindowPositioning.Rect(self.candidatesWindow.frame),
+            anchorFrame: WindowPositioning.Rect(anchorFrame),
             screenRect: WindowPositioning.Rect(screen.visibleFrame),
             gap: Double(gap)
         )
